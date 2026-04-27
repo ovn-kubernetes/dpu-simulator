@@ -72,6 +72,23 @@ func TestMergeNodeIPIntoKubeadmArgsLineNoop(t *testing.T) {
 	}
 }
 
+// Already correct node-ip before other additional flags must not reorder or set the changed flag (avoids unnecessary kubelet restart).
+func TestMergeNodeIPIntoKubeadmArgsLineNoopNodeIPFirst(t *testing.T) {
+	const ip = "192.168.123.12"
+	in := `KUBELET_KUBEADM_ARGS="--node-ip=` + ip + ` --x=1"
+`
+	out, changed, err := mergeNodeIPIntoKubeadmArgsLine(in, ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatalf("unexpected change: %q", out)
+	}
+	if out != in {
+		t.Fatalf("noop should preserve flag order\ngot:  %q\nwant: %q", out, in)
+	}
+}
+
 // Trailing whitespace or CR after the closing quote (e.g. CRLF split) must not break parsing;
 // noop must not rewrite when there is only the --node-ip difference from normalized line.
 func TestMergeNodeIPIntoKubeadmArgsLineQuotedValueTrailingJunk(t *testing.T) {

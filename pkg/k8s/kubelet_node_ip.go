@@ -35,6 +35,21 @@ func mergeNodeIPIntoKubeadmArgsLine(fileContent, nodeIP string) (string, bool, e
 		}
 		inner := rest[1 : len(rest)-1]
 		fields := strings.Fields(inner)
+		desired := "--node-ip=" + nodeIP
+		hasDesired, hasOtherNodeIP := false, false
+		for _, f := range fields {
+			if !strings.HasPrefix(f, "--node-ip=") {
+				continue
+			}
+			if f == desired {
+				hasDesired = true
+			} else {
+				hasOtherNodeIP = true
+			}
+		}
+		if hasDesired && !hasOtherNodeIP {
+			break
+		}
 		var kept []string
 		for _, f := range fields {
 			if strings.HasPrefix(f, "--node-ip=") {
