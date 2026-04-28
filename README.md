@@ -53,9 +53,9 @@ All these DPUs have common simularities, some we can emulate better than others.
 ### Dependencies
 Runtime dependencies are automatically installed by dpu-sim. For example the dpu-sim binary will output the following if all depencies are meet on the system:
 
-Seperate dependencies are checked whether the provided configuration file is deploying VM vs. Kind modes.
+Separate dependencies are checked based on whether the provided configuration deploys VM or Kind mode.
 
-For VM based deployments:
+For VM-based deployments:
 ```bash
 === Checking Dependencies ===
 ✓ Detected Linux distribution: rhel 9.6 (package manager: dnf, architecture: x86_64)
@@ -74,7 +74,7 @@ For VM based deployments:
 ✓ All dependencies are available
 ```
 
-For Kind based deployments:
+For Kind-based deployments:
 ```bash
 === Checking Dependencies ===
 ✓ Detected Linux distribution: rhel 9.6 (package manager: dnf, architecture: x86_64)
@@ -93,9 +93,9 @@ For Kind based deployments:
 
 The dpu-sim should install all dependecies by detecting the system's Linux distribution. However some distributions require enabling subscriptions to allow the installation of some packages. This is outside the scope of dpu-sim; however depending on the distribution, dpu-sim will try to enable repositories.
 
-### Required Services for VM based deployments
+### Required Services for VM-based deployments
 
-Although dpu-sim tries to install dependencies, the user may be required to start required services for VM based deployments. This can potentially go away once dpu-sim handles these required services in its entirety.
+Although dpu-sim tries to install dependencies, the user may be required to start required services for VM-based deployments. This can potentially go away once dpu-sim handles these required services in its entirety.
 
 ```bash
 # Start and enable libvirt sockets
@@ -116,7 +116,7 @@ sudo usermod -a -G libvirt $USER
 newgrp libvirt
 ```
 
-### Required SSH Key Setup for VM based deployments
+### Required SSH Key Setup for VM-based deployments
 
 Generate SSH keys if you don't have them:
 
