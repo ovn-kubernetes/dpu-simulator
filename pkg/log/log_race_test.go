@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestConcurrentLogWritesRace test concurrent access to log()
-// Internally, log() at log.go:124 is using a read only lock
-// and freeing it before the call to Fprint.
+// TestConcurrentLogWritesRace tests that concurrent calls to log() do not
+// cause data races when writing to a shared output buffer.
 // Run with: go test -race -run TestConcurrentLogWritesRace ./pkg/log/
 func TestConcurrentLogWritesRace(t *testing.T) {
 	var buf bytes.Buffer // contended buffer
