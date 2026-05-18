@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -22,6 +23,8 @@ import (
 	"k8s.io/klog/v2"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
+
+const dpDeviceInfoPath = "/var/run/k8s.cni.cncf.io/devinfo/dp"
 
 // DpuSimDevicePlugin implements the Kubernetes device plugin API for a single resource pool.
 type DpuSimDevicePlugin struct {
@@ -67,6 +70,12 @@ func (p *DpuSimDevicePlugin) discoverDevices() error {
 // It blocks until ctx is cancelled.
 func (p *DpuSimDevicePlugin) Run(ctx context.Context) error {
 	if err := p.discoverDevices(); err != nil {
+		return err
+	}
+
+	// TODO: Reclaim stale device-info files only after reconciling live
+	// allocations, so files still referenced by active pods are preserved.
+	if err := p.writeDeviceInfoFiles(); err != nil {
 		return err
 	}
 
@@ -152,6 +161,11 @@ func (p *DpuSimDevicePlugin) Allocate(_ context.Context, req *pluginapi.Allocate
 	for _, creq := range req.ContainerRequests {
 		ids := strings.Join(creq.DevicesIds, ",")
 		klog.Infof("[%s] allocating devices: %s", p.pool.ResourceName, ids)
+		for _, id := range creq.DevicesIds {
+			if err := p.writeDeviceInfoFile(id); err != nil {
+				return nil, err
+			}
+		}
 		resp.ContainerResponses = append(resp.ContainerResponses, &pluginapi.ContainerAllocateResponse{
 			Envs: map[string]string{
 				p.pool.EnvVarName: ids,
@@ -159,6 +173,43 @@ func (p *DpuSimDevicePlugin) Allocate(_ context.Context, req *pluginapi.Allocate
 		})
 	}
 	return resp, nil
+}
+
+func (p *DpuSimDevicePlugin) writeDeviceInfoFiles() error {
+	for _, device := range p.devices {
+		if err := p.writeDeviceInfoFile(device.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *DpuSimDevicePlugin) writeDeviceInfoFile(deviceID string) error {
+	if err := os.MkdirAll(dpDeviceInfoPath, 0755); err != nil {
+		return fmt.Errorf("[%s] failed to create device info directory: %w", p.pool.ResourceName, err)
+	}
+
+	info := map[string]string{
+		"version": "1.1.0",
+	}
+	data, err := json.MarshalIndent(info, "", "  ")
+	if err != nil {
+		return fmt.Errorf("[%s] failed to marshal device info for %s: %w", p.pool.ResourceName, deviceID, err)
+	}
+	data = append(data, '\n')
+
+	path := filepath.Join(dpDeviceInfoPath, deviceInfoFileName(p.pool.ResourceName, deviceID))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("[%s] failed to write device info for %s: %w", p.pool.ResourceName, deviceID, err)
+	}
+	klog.Infof("[%s] wrote device info for %s to %s", p.pool.ResourceName, deviceID, path)
+	return nil
+}
+
+func deviceInfoFileName(resourceName, deviceID string) string {
+	return fmt.Sprintf("%s-%s-device.json",
+		strings.ReplaceAll(resourceName, "/", "-"),
+		strings.ReplaceAll(deviceID, "/", "-"))
 }
 
 func (p *DpuSimDevicePlugin) GetPreferredAllocation(context.Context, *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
