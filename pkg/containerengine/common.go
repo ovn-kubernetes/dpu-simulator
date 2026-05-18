@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/platform"
 )
+
+const kindExperimentalProviderEnv = "KIND_EXPERIMENTAL_PROVIDER"
 
 type baseEngine struct {
 	name Name
@@ -131,7 +134,7 @@ func (e *baseEngine) ConnectNetwork(_ context.Context, network, container string
 }
 
 func NewContainerEngine(exec platform.CommandExecutor) (Engine, error) {
-	detected, err := DetectName(DetectionInput{})
+	detected, err := DetectName(DetectionInput{Preferred: Name(os.Getenv(kindExperimentalProviderEnv))})
 	if err != nil {
 		log.Warn("Invalid container engine hint: %v; falling back to auto detection", err)
 		detected = EngineAuto
