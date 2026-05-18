@@ -252,11 +252,7 @@ func (m *CNIManager) getDPUHostClusterSecretCredentials(namespace, secretName st
 			apiServerURL = "https://" + masterVMs[0].K8sNodeIP + ":6443"
 		}
 	} else if m.config.IsKindMode() {
-		ip, err := m.getKindControlPlaneIP(hostClusterName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get Kind control plane IP for host cluster %s: %w", hostClusterName, err)
-		}
-		apiServerURL = "https://" + ip + ":6443"
+		apiServerURL = kindControlPlaneAPIURL(hostClusterName)
 	}
 	if apiServerURL == "" {
 		apiServerURL = hostClient.GetAPIServerURL()

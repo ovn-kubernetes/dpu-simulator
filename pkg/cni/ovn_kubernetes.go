@@ -1070,11 +1070,7 @@ func (m *CNIManager) getDPUHostClusterCredentials() (*DPUHostCredentials, error)
 			apiServerURL = "https://" + masterVMs[0].K8sNodeIP + ":6443"
 		}
 	} else if m.config.IsKindMode() {
-		ip, err := m.getKindControlPlaneIP(hostClusterName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get Kind control plane IP for host cluster %s: %w", hostClusterName, err)
-		}
-		apiServerURL = "https://" + ip + ":6443"
+		apiServerURL = kindControlPlaneAPIURL(hostClusterName)
 	}
 	if apiServerURL == "" {
 		apiServerURL = hostClient.GetAPIServerURL()
@@ -1099,28 +1095,8 @@ func (m *CNIManager) getDPUHostClusterCredentials() (*DPUHostCredentials, error)
 	return credentials, nil
 }
 
-// getKindControlPlaneIP returns the IP of a Kind cluster's control plane
-// container on the "kind" Docker network. This address is routable from
-// other Kind containers, unlike the 127.0.0.1 (localhost) URL in kubeconfigs.
-func (m *CNIManager) getKindControlPlaneIP(clusterName string) (string, error) {
-	localExec := platform.NewLocalExecutor()
-	engine, err := containerengine.NewProjectEngine(localExec)
-	if err != nil {
-		return "", fmt.Errorf("failed to create container engine: %w", err)
-	}
-
-	cpContainer := clusterName + "-control-plane"
-	networks, err := engine.InspectContainerNetworks(context.Background(), cpContainer)
-	if err != nil {
-		return "", fmt.Errorf("failed to inspect container %s networks: %w", cpContainer, err)
-	}
-
-	ep, ok := networks["kind"]
-	if !ok || ep.IPAddress == "" {
-		return "", fmt.Errorf("control plane container %s has no IP on the 'kind' network", cpContainer)
-	}
-
-	return ep.IPAddress, nil
+func kindControlPlaneAPIURL(clusterName string) string {
+	return "https://" + clusterName + "-control-plane:6443"
 }
 
 // SetupOVNKOffloadToDPUNodeOVS configures OVS external_ids on a DPU node so that
