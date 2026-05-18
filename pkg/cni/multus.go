@@ -1,6 +1,7 @@
 package cni
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -9,6 +10,9 @@ import (
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/deviceplugin"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 // MultusManifestURL is the URL for the Multus CNI manifest
@@ -20,7 +24,7 @@ const MultusManifestURL = "https://raw.githubusercontent.com/k8snetworkplumbingw
 // Attachment Definition instead of auto-discovering from the CNI config
 // directory.
 // See: https://ovn-kubernetes.io/blog/dpu-acceleration/#install-multus
-func (m *CNIManager) installMultus(clusterName string) error {
+func (m *CNIManager) installMultus(clusterName, apiServerHost string) error {
 	log.Debug("Installing Multus CNI...")
 
 	manifest, err := downloadManifest(MultusManifestURL)
@@ -49,6 +53,12 @@ func (m *CNIManager) installMultus(clusterName string) error {
 		return fmt.Errorf("failed to install Multus: %w", err)
 	}
 
+	if strings.TrimSpace(apiServerHost) != "" {
+		if err := m.patchMultusAPIServer(apiServerHost); err != nil {
+			return err
+		}
+	}
+
 	// The Multus manifest includes the NetworkAttachmentDefinition CRD.
 	// Invalidate the discovery cache so we can create NAD resources below.
 	m.k8sClient.InvalidateDiscoveryCache()
@@ -67,6 +77,53 @@ func (m *CNIManager) installMultus(clusterName string) error {
 	}
 
 	return nil
+}
+
+func (m *CNIManager) patchMultusAPIServer(apiServerHost string) error {
+	apiServerHost = strings.TrimSpace(apiServerHost)
+	if apiServerHost == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		ds, err := m.k8sClient.Clientset().AppsV1().DaemonSets("kube-system").Get(ctx, "kube-multus-ds", metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get Multus daemonset: %w", err)
+		}
+
+		for i := range ds.Spec.Template.Spec.Containers {
+			if ds.Spec.Template.Spec.Containers[i].Name != "kube-multus" {
+				continue
+			}
+
+			setContainerEnv(&ds.Spec.Template.Spec.Containers[i], "KUBERNETES_SERVICE_HOST", apiServerHost)
+			setContainerEnv(&ds.Spec.Template.Spec.Containers[i], "KUBERNETES_SERVICE_PORT", "6443")
+			_, err = m.k8sClient.Clientset().AppsV1().DaemonSets("kube-system").Update(ctx, ds, metav1.UpdateOptions{})
+			return err
+		}
+
+		return fmt.Errorf("failed to find kube-multus container in Multus daemonset")
+	}); err != nil {
+		return fmt.Errorf("failed to patch Multus API endpoint: %w", err)
+	}
+
+	log.Info("✓ Patched Multus to use API endpoint https://%s:6443", apiServerHost)
+	return nil
+}
+
+func setContainerEnv(container *corev1.Container, name, value string) {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			container.Env[i].Value = value
+			container.Env[i].ValueFrom = nil
+			return
+		}
+	}
+
+	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
 }
 
 func (m *CNIManager) clusterUsesOVNKubernetes(clusterName string) bool {

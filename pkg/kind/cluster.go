@@ -210,7 +210,7 @@ func (m *KindManager) InstallCNI(cmdExec platform.CommandExecutor) error {
 			return fmt.Errorf("failed to install CNI on cluster %s: %w", clusterCfg.Name, err)
 		}
 
-		if err := cniMgr.InstallAddons(clusterCfg.Addons, clusterCfg.Name); err != nil {
+		if err := cniMgr.InstallAddons(clusterCfg.Addons, clusterCfg.Name, apiServerIP); err != nil {
 			return fmt.Errorf("failed to install addons: %w", err)
 		}
 

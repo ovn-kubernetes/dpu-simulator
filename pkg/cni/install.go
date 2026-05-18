@@ -53,12 +53,12 @@ func (m *CNIManager) InstallCNI(cniType config.CNIType, clusterName string, k8sI
 	return nil
 }
 
-func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName string) error {
+func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName, apiServerHost string) error {
 	log.Info("\n=== Installing addon %s on cluster %s ===", addonType, clusterName)
 
 	switch addonType {
 	case config.AddonMultus:
-		return m.installMultus(clusterName)
+		return m.installMultus(clusterName, apiServerHost)
 	case config.AddonCertManager:
 		return m.installCertManager(clusterName)
 	case config.AddonWhereabouts:
@@ -68,10 +68,10 @@ func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName string
 	}
 }
 
-func (m *CNIManager) InstallAddons(addons []config.AddonType, clusterName string) error {
+func (m *CNIManager) InstallAddons(addons []config.AddonType, clusterName, apiServerHost string) error {
 	orderedAddons := resolveAddonInstallOrder(addons)
 	for _, addon := range orderedAddons {
-		if err := m.InstallAddon(addon, clusterName); err != nil {
+		if err := m.InstallAddon(addon, clusterName, apiServerHost); err != nil {
 			return err
 		}
 	}
