@@ -37,6 +37,26 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// SetOVNKubernetesMode validates and stores how dpu-sim should handle
+// OVN-Kubernetes Helm deployment.
+func (c *Config) SetOVNKubernetesMode(mode string) error {
+	switch mode {
+	case "", OVNKubernetesModeInstall:
+		c.OVNKubernetesMode = OVNKubernetesModeInstall
+	case OVNKubernetesModeValuesOnly:
+		c.OVNKubernetesMode = OVNKubernetesModeValuesOnly
+	default:
+		return fmt.Errorf("unsupported OVN-Kubernetes mode %q, expected %q or %q", mode, OVNKubernetesModeInstall, OVNKubernetesModeValuesOnly)
+	}
+	return nil
+}
+
+// ShouldInstallOVNKubernetes returns true when dpu-sim should run Helm for
+// OVN-Kubernetes. The zero value preserves the historical install behavior.
+func (c *Config) ShouldInstallOVNKubernetes() bool {
+	return c.OVNKubernetesMode == "" || c.OVNKubernetesMode == OVNKubernetesModeInstall
+}
+
 // validate and set defaults checks that all mandatory fields in the configuration are set
 // and sets default values for optional fields.
 func (c *Config) validateAndSetDefaults() error {

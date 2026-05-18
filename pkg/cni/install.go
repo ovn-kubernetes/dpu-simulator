@@ -40,7 +40,11 @@ func (m *CNIManager) InstallCNI(cniType config.CNIType, clusterName string, k8sI
 	}
 
 	if cniType != config.CNIOVNKubernetes && m.config.DPUClusterNeedsOVNK(clusterName) {
-		log.Info("\n=== DPU offload enabled: auto-deploying OVN-Kubernetes in DPU mode on cluster %s ===", clusterName)
+		if !m.config.ShouldInstallOVNKubernetes() {
+			log.Info("\n=== DPU offload enabled: generating OVN-Kubernetes DPU values on cluster %s ===", clusterName)
+		} else {
+			log.Info("\n=== DPU offload enabled: auto-deploying OVN-Kubernetes in DPU mode on cluster %s ===", clusterName)
+		}
 		if err := m.installOVNKubernetes(clusterName, k8sIP); err != nil {
 			return fmt.Errorf("failed to install OVN-Kubernetes DPU mode on cluster %s: %w", clusterName, err)
 		}

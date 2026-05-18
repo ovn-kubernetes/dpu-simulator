@@ -25,6 +25,7 @@ var (
 	configPath        string
 	logLevel          string
 	ovnKubernetesPath string
+	ovnKubernetesMode string
 
 	// Root command flags
 	skipDeps    bool
@@ -58,6 +59,8 @@ func init() {
 		fmt.Sprintf("Log level (%s)", strings.Join(log.ValidLevels(), ", ")))
 	rootCmd.PersistentFlags().StringVar(&ovnKubernetesPath, "ovn-kubernetes-path", "",
 		"Path to an external ovn-kubernetes source tree (overrides auto-clone)")
+	rootCmd.PersistentFlags().StringVar(&ovnKubernetesMode, "ovnk-mode", config.OVNKubernetesModeInstall,
+		fmt.Sprintf("OVN-Kubernetes handling mode (%s|%s)", config.OVNKubernetesModeInstall, config.OVNKubernetesModeValuesOnly))
 
 	// Root command flags
 	rootCmd.Flags().BoolVar(&cleanupOnly, "cleanup", false, "Only cleanup existing resources, do not deploy")
@@ -92,6 +95,9 @@ func runDeploy(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--ovn-kubernetes-path: %w", err)
 	}
 	cfg.OVNKubernetesPath = ovnPath
+	if err := cfg.SetOVNKubernetesMode(strings.TrimSpace(ovnKubernetesMode)); err != nil {
+		return err
+	}
 
 	// Create registry manager once if configured; nil otherwise.
 	localExec := platform.NewLocalExecutor()

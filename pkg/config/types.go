@@ -23,6 +23,12 @@ const (
 	DefaultRegistryPort = "5000"
 	// RegistryImage is the Docker image used for the registry
 	DefaultRegistryImage = "registry:2"
+
+	// OVNKubernetesModeInstall deploys OVN-Kubernetes with Helm as part of dpu-sim.
+	OVNKubernetesModeInstall = "install"
+	// OVNKubernetesModeValuesOnly generates Helm values and support artifacts but
+	// leaves the OVN-Kubernetes Helm deployment to the caller.
+	OVNKubernetesModeValuesOnly = "values-only"
 )
 
 // DPUHostNodeLabelKey is the node label used by OVN-Kubernetes for DPU Host Nodes
@@ -60,6 +66,10 @@ type Config struct {
 	// point dpu-sim at a separate checkout (e.g. an OVN-Kubernetes PR).
 	// This is not populated from YAML.
 	OVNKubernetesPath string `yaml:"-"`
+	// OVNKubernetesMode controls whether dpu-sim installs OVN-Kubernetes or only
+	// emits values files for an external Helm install. Set via --ovnk-mode.
+	// This is not populated from YAML.
+	OVNKubernetesMode string `yaml:"-"`
 	// TFT is the kubernetes-traffic-flow-tests "tft" document subtree (optional).
 	// Used by `dpu-sim tft run` to generate a TFT config when --tft-config is not set.
 	TFT *TrafficFlowTestsSubtree `yaml:"tft,omitempty"`

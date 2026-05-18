@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
@@ -202,6 +203,19 @@ func (m *CNIManager) installOVNKubernetes(clusterName string, k8sIP string) erro
 		if err := m.labelNodesForDPU(clusterName); err != nil {
 			return fmt.Errorf("failed to label DPU nodes: %w", err)
 		}
+	}
+
+	if !m.config.ShouldInstallOVNKubernetes() {
+		if mode == ovnkModeDPUHost {
+			if err := m.createDPUAccessSecret(); err != nil {
+				log.Warn("DPU host access secret is not available yet; rerun values-only after host OVN-Kubernetes is installed: %v", err)
+			}
+		}
+		if err := m.writeOVNKubernetesHelmValues(mode, clusterName, ovnImage, true); err != nil {
+			return fmt.Errorf("failed to write OVN-Kubernetes Helm values: %w", err)
+		}
+		log.Info("✓ OVN-Kubernetes Helm install skipped for cluster %s (mode=%s); generated values instead", clusterName, mode)
+		return nil
 	}
 
 	if err := m.runHelmInstall(mode, clusterName, ovnKPath, apiServerURL, podCIDR, serviceCIDR, ovnImage); err != nil {
@@ -981,7 +995,7 @@ func (m *CNIManager) createDPUAccessSecret() error {
 	}
 
 	_, err := m.k8sClient.Clientset().CoreV1().Secrets("ovn-kubernetes").Create(ctx, secret, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create DPU access secret: %w", err)
 	}
 
@@ -1000,6 +1014,12 @@ func (m *CNIManager) createDPUAccessSecret() error {
 	}
 
 	return fmt.Errorf("timed out waiting for DPU access secret to be populated")
+}
+
+// CreateOVNKubernetesDPUAccessSecret provisions the host-cluster service
+// account token used by OVN-Kubernetes pods running on the DPU cluster.
+func (m *CNIManager) CreateOVNKubernetesDPUAccessSecret() error {
+	return m.createDPUAccessSecret()
 }
 
 // getDPUHostClusterCredentials retrieves the service account token and CA
