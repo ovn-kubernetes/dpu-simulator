@@ -1,6 +1,7 @@
 package cni
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -9,6 +10,9 @@ import (
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/deviceplugin"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 )
 
 // MultusManifestURL is the URL for the Multus CNI manifest
@@ -20,7 +24,7 @@ const MultusManifestURL = "https://raw.githubusercontent.com/k8snetworkplumbingw
 // Attachment Definition instead of auto-discovering from the CNI config
 // directory.
 // See: https://ovn-kubernetes.io/blog/dpu-acceleration/#install-multus
-func (m *CNIManager) installMultus(clusterName string) error {
+func (m *CNIManager) installMultus(clusterName, apiServerHost string) error {
 	log.Debug("Installing Multus CNI...")
 
 	manifest, err := downloadManifest(MultusManifestURL)
@@ -49,6 +53,10 @@ func (m *CNIManager) installMultus(clusterName string) error {
 		return fmt.Errorf("failed to install Multus: %w", err)
 	}
 
+	if err := m.patchMultusDaemonSet(apiServerHost); err != nil {
+		return err
+	}
+
 	// The Multus manifest includes the NetworkAttachmentDefinition CRD.
 	// Invalidate the discovery cache so we can create NAD resources below.
 	m.k8sClient.InvalidateDiscoveryCache()
@@ -61,12 +69,110 @@ func (m *CNIManager) installMultus(clusterName string) error {
 
 	log.Info("✓ Multus is installed")
 
+	if m.clusterUsesOVNKubernetes(clusterName) && !m.config.ShouldInstallOVNKubernetes() {
+		log.Info("Skipping Multus readiness wait until external OVN-Kubernetes Helm install creates the readiness indicator")
+		return nil
+	}
+
 	// Wait for Multus daemonset pods to be ready.
 	if err := m.k8sClient.WaitForPodsReady("kube-system", "name=multus", 3*time.Minute); err != nil {
 		return fmt.Errorf("multus pods are not ready: %w", err)
 	}
 
 	return nil
+}
+
+func (m *CNIManager) patchMultusDaemonSet(apiServerHost string) error {
+	apiServerHost = strings.TrimSpace(apiServerHost)
+	removedLimits := false
+	patchedAPIServer := false
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		ds, err := m.k8sClient.Clientset().AppsV1().DaemonSets("kube-system").Get(ctx, "kube-multus-ds", metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to get Multus daemonset: %w", err)
+		}
+
+		for i := range ds.Spec.Template.Spec.Containers {
+			if ds.Spec.Template.Spec.Containers[i].Name != "kube-multus" {
+				continue
+			}
+
+			container := &ds.Spec.Template.Spec.Containers[i]
+			changed := removeCPUMemoryLimits(container)
+			if changed {
+				removedLimits = true
+			}
+			if apiServerHost != "" {
+				if setContainerEnv(container, "KUBERNETES_SERVICE_HOST", apiServerHost) {
+					changed = true
+					patchedAPIServer = true
+				}
+				if setContainerEnv(container, "KUBERNETES_SERVICE_PORT", "6443") {
+					changed = true
+					patchedAPIServer = true
+				}
+			}
+			if !changed {
+				return nil
+			}
+
+			_, err = m.k8sClient.Clientset().AppsV1().DaemonSets("kube-system").Update(ctx, ds, metav1.UpdateOptions{})
+			return err
+		}
+
+		return fmt.Errorf("failed to find kube-multus container in Multus daemonset")
+	}); err != nil {
+		return fmt.Errorf("failed to patch Multus daemonset: %w", err)
+	}
+
+	if removedLimits {
+		log.Info("✓ Removed Multus CPU and memory limits")
+	}
+	if patchedAPIServer {
+		log.Info("✓ Patched Multus to use API endpoint https://%s:6443", apiServerHost)
+	}
+
+	return nil
+}
+
+func removeCPUMemoryLimits(container *corev1.Container) bool {
+	if container.Resources.Limits == nil {
+		return false
+	}
+
+	changed := false
+	if _, ok := container.Resources.Limits[corev1.ResourceCPU]; ok {
+		delete(container.Resources.Limits, corev1.ResourceCPU)
+		changed = true
+	}
+	if _, ok := container.Resources.Limits[corev1.ResourceMemory]; ok {
+		delete(container.Resources.Limits, corev1.ResourceMemory)
+		changed = true
+	}
+	if len(container.Resources.Limits) == 0 {
+		container.Resources.Limits = nil
+	}
+	return changed
+}
+
+func setContainerEnv(container *corev1.Container, name, value string) bool {
+	for i := range container.Env {
+		if container.Env[i].Name == name {
+			if container.Env[i].Value == value && container.Env[i].ValueFrom == nil {
+				return false
+			}
+			container.Env[i].Value = value
+			container.Env[i].ValueFrom = nil
+			return true
+		}
+	}
+
+	container.Env = append(container.Env, corev1.EnvVar{Name: name, Value: value})
+	return true
 }
 
 func (m *CNIManager) clusterUsesOVNKubernetes(clusterName string) bool {

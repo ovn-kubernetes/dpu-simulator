@@ -13,6 +13,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
@@ -204,6 +205,19 @@ func (m *CNIManager) installOVNKubernetes(clusterName string, k8sIP string) erro
 		}
 	}
 
+	if !m.config.ShouldInstallOVNKubernetes() {
+		if mode == ovnkModeDPUHost {
+			if err := m.createDPUAccessSecret(); err != nil {
+				log.Warn("DPU host access secret is not available yet; rerun values-only after host OVN-Kubernetes is installed: %v", err)
+			}
+		}
+		if err := m.writeOVNKubernetesHelmValues(mode, clusterName, ovnImage, true); err != nil {
+			return fmt.Errorf("failed to write OVN-Kubernetes Helm values: %w", err)
+		}
+		log.Info("✓ OVN-Kubernetes Helm install skipped for cluster %s (mode=%s); generated values instead", clusterName, mode)
+		return nil
+	}
+
 	if err := m.runHelmInstall(mode, clusterName, ovnKPath, apiServerURL, podCIDR, serviceCIDR, ovnImage); err != nil {
 		return fmt.Errorf("failed to run helm install: %w", err)
 	}
@@ -283,6 +297,8 @@ func (m *CNIManager) runHelmInstall(mode ovnkMode, clusterName, ovnkRepoPath, ap
 				"--set", "tags.ovnkube-node-dpu-host=true",
 				"--set", "global.enableOvnKubeIdentity=false",
 				"--set", fmt.Sprintf("ovnkube-node-dpu-host.nodeMgmtPortNetdev=%s", dpuHostMgmtPort),
+				"--set", fmt.Sprintf("ovnkube-node-dpu-host.mgmtPortVFResourceName=%s", deviceplugin.VFResourceName),
+				"--set", fmt.Sprintf("ovnkube-node-dpu-host.mgmtPortVFsCount=%d", m.config.DPUHostManagementPortVFsCount()),
 				"--set", fmt.Sprintf("ovnkube-node-dpu-host.gatewayOpts=--gateway-interface=%s", dpuHostGw),
 				"--set", "global.simulateDpu=true",
 			)
@@ -981,7 +997,7 @@ func (m *CNIManager) createDPUAccessSecret() error {
 	}
 
 	_, err := m.k8sClient.Clientset().CoreV1().Secrets("ovn-kubernetes").Create(ctx, secret, metav1.CreateOptions{})
-	if err != nil {
+	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create DPU access secret: %w", err)
 	}
 
@@ -1000,6 +1016,12 @@ func (m *CNIManager) createDPUAccessSecret() error {
 	}
 
 	return fmt.Errorf("timed out waiting for DPU access secret to be populated")
+}
+
+// CreateOVNKubernetesDPUAccessSecret provisions the host-cluster service
+// account token used by OVN-Kubernetes pods running on the DPU cluster.
+func (m *CNIManager) CreateOVNKubernetesDPUAccessSecret() error {
+	return m.createDPUAccessSecret()
 }
 
 // getDPUHostClusterCredentials retrieves the service account token and CA
@@ -1050,11 +1072,7 @@ func (m *CNIManager) getDPUHostClusterCredentials() (*DPUHostCredentials, error)
 			apiServerURL = "https://" + masterVMs[0].K8sNodeIP + ":6443"
 		}
 	} else if m.config.IsKindMode() {
-		ip, err := m.getKindControlPlaneIP(hostClusterName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get Kind control plane IP for host cluster %s: %w", hostClusterName, err)
-		}
-		apiServerURL = "https://" + ip + ":6443"
+		apiServerURL = kindControlPlaneAPIURL(hostClusterName)
 	}
 	if apiServerURL == "" {
 		apiServerURL = hostClient.GetAPIServerURL()
@@ -1079,28 +1097,8 @@ func (m *CNIManager) getDPUHostClusterCredentials() (*DPUHostCredentials, error)
 	return credentials, nil
 }
 
-// getKindControlPlaneIP returns the IP of a Kind cluster's control plane
-// container on the "kind" Docker network. This address is routable from
-// other Kind containers, unlike the 127.0.0.1 (localhost) URL in kubeconfigs.
-func (m *CNIManager) getKindControlPlaneIP(clusterName string) (string, error) {
-	localExec := platform.NewLocalExecutor()
-	engine, err := containerengine.NewProjectEngine(localExec)
-	if err != nil {
-		return "", fmt.Errorf("failed to create container engine: %w", err)
-	}
-
-	cpContainer := clusterName + "-control-plane"
-	networks, err := engine.InspectContainerNetworks(context.Background(), cpContainer)
-	if err != nil {
-		return "", fmt.Errorf("failed to inspect container %s networks: %w", cpContainer, err)
-	}
-
-	ep, ok := networks["kind"]
-	if !ok || ep.IPAddress == "" {
-		return "", fmt.Errorf("control plane container %s has no IP on the 'kind' network", cpContainer)
-	}
-
-	return ep.IPAddress, nil
+func kindControlPlaneAPIURL(clusterName string) string {
+	return "https://" + clusterName + "-control-plane:6443"
 }
 
 // SetupOVNKOffloadToDPUNodeOVS configures OVS external_ids on a DPU node so that

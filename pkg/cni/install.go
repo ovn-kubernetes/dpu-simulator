@@ -40,7 +40,11 @@ func (m *CNIManager) InstallCNI(cniType config.CNIType, clusterName string, k8sI
 	}
 
 	if cniType != config.CNIOVNKubernetes && m.config.DPUClusterNeedsOVNK(clusterName) {
-		log.Info("\n=== DPU offload enabled: auto-deploying OVN-Kubernetes in DPU mode on cluster %s ===", clusterName)
+		if !m.config.ShouldInstallOVNKubernetes() {
+			log.Info("\n=== DPU offload enabled: generating OVN-Kubernetes DPU values on cluster %s ===", clusterName)
+		} else {
+			log.Info("\n=== DPU offload enabled: auto-deploying OVN-Kubernetes in DPU mode on cluster %s ===", clusterName)
+		}
 		if err := m.installOVNKubernetes(clusterName, k8sIP); err != nil {
 			return fmt.Errorf("failed to install OVN-Kubernetes DPU mode on cluster %s: %w", clusterName, err)
 		}
@@ -49,12 +53,12 @@ func (m *CNIManager) InstallCNI(cniType config.CNIType, clusterName string, k8sI
 	return nil
 }
 
-func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName string) error {
+func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName, apiServerHost string) error {
 	log.Info("\n=== Installing addon %s on cluster %s ===", addonType, clusterName)
 
 	switch addonType {
 	case config.AddonMultus:
-		return m.installMultus(clusterName)
+		return m.installMultus(clusterName, apiServerHost)
 	case config.AddonCertManager:
 		return m.installCertManager(clusterName)
 	case config.AddonWhereabouts:
@@ -64,10 +68,10 @@ func (m *CNIManager) InstallAddon(addonType config.AddonType, clusterName string
 	}
 }
 
-func (m *CNIManager) InstallAddons(addons []config.AddonType, clusterName string) error {
+func (m *CNIManager) InstallAddons(addons []config.AddonType, clusterName, apiServerHost string) error {
 	orderedAddons := resolveAddonInstallOrder(addons)
 	for _, addon := range orderedAddons {
-		if err := m.InstallAddon(addon, clusterName); err != nil {
+		if err := m.InstallAddon(addon, clusterName, apiServerHost); err != nil {
 			return err
 		}
 	}

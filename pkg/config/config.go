@@ -18,6 +18,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultDPUHostMgmtPortVFsCount = 2
+
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -35,6 +37,26 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// SetOVNKubernetesMode validates and stores how dpu-sim should handle
+// OVN-Kubernetes Helm deployment.
+func (c *Config) SetOVNKubernetesMode(mode string) error {
+	switch mode {
+	case "", OVNKubernetesModeInstall:
+		c.OVNKubernetesMode = OVNKubernetesModeInstall
+	case OVNKubernetesModeValuesOnly:
+		c.OVNKubernetesMode = OVNKubernetesModeValuesOnly
+	default:
+		return fmt.Errorf("unsupported OVN-Kubernetes mode %q, expected %q or %q", mode, OVNKubernetesModeInstall, OVNKubernetesModeValuesOnly)
+	}
+	return nil
+}
+
+// ShouldInstallOVNKubernetes returns true when dpu-sim should run Helm for
+// OVN-Kubernetes. The zero value preserves the historical install behavior.
+func (c *Config) ShouldInstallOVNKubernetes() bool {
+	return c.OVNKubernetesMode == "" || c.OVNKubernetesMode == OVNKubernetesModeInstall
 }
 
 // validate and set defaults checks that all mandatory fields in the configuration are set
@@ -82,12 +104,23 @@ func (c *Config) validateAndSetDefaults() error {
 			if c.Networks[i].NumPairs <= 0 {
 				c.Networks[i].NumPairs = 1
 			}
+			availableMgmtPortVFs := c.Networks[i].NumPairs - 2
+			if c.Networks[i].MgmtPortVFsCount > 0 && c.Networks[i].MgmtPortVFsCount > availableMgmtPortVFs {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' must be <= num_pairs-2 (%d) because eth0-0 and eth0-1 are reserved",
+					i, net.Name, availableMgmtPortVFs))
+			}
+			if c.Networks[i].MgmtPortVFsCount <= 0 {
+				c.Networks[i].MgmtPortVFsCount = defaultDPUHostMgmtPortVFs(c.Networks[i].NumPairs)
+			}
 		} else {
 			if net.BridgeName == "" {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'bridge_name' is required", i, net.Name))
 			}
 			if net.NumPairs > 0 {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'num_pairs' is not allowed for type %s", i, net.Name, net.Type))
+			}
+			if net.MgmtPortVFsCount > 0 {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' is not allowed for type %s", i, net.Name, net.Type))
 			}
 			if c.Networks[i].Mode == "" {
 				c.Networks[i].Mode = "nat"
@@ -876,6 +909,27 @@ func (c *Config) GetHostToDpuNumPairs() int {
 		return 1
 	}
 	return net.NumPairs
+}
+
+// DPUHostManagementPortVFsCount returns how many simulated VFs ovnkube-node
+// should request for default and primary UDN management ports.
+func (c *Config) DPUHostManagementPortVFsCount() int {
+	net := c.GetHostToDpuNetwork()
+	if net == nil || net.MgmtPortVFsCount <= 0 {
+		return 1
+	}
+	return net.MgmtPortVFsCount
+}
+
+func defaultDPUHostMgmtPortVFs(numPairs int) int {
+	available := numPairs - 2
+	if available <= 0 {
+		return 1
+	}
+	if available < defaultDPUHostMgmtPortVFsCount {
+		return available
+	}
+	return defaultDPUHostMgmtPortVFsCount
 }
 
 // GetNetworkByName returns the network configuration by name

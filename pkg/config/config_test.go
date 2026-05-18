@@ -234,6 +234,50 @@ func TestGetKindNodeCounts(t *testing.T) {
 	assert.Equal(t, 1, cfg.GetKindWorkerCount("cluster-b"))
 }
 
+func TestDPUHostManagementPortVFsCount(t *testing.T) {
+	tests := []struct {
+		name     string
+		network  NetworkConfig
+		expected int
+	}{
+		{
+			name:     "defaults to two when enough simulated VFs are available",
+			network:  NetworkConfig{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16},
+			expected: 2,
+		},
+		{
+			name:     "uses configured count",
+			network:  NetworkConfig{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16, MgmtPortVFsCount: 4},
+			expected: 4,
+		},
+		{
+			name:     "falls back to one when only one resource VF is available",
+			network:  NetworkConfig{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 3},
+			expected: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Networks: []NetworkConfig{tt.network}}
+			require.NoError(t, cfg.validateAndSetDefaults())
+			assert.Equal(t, tt.expected, cfg.DPUHostManagementPortVFsCount())
+		})
+	}
+}
+
+func TestValidateHostToDpuManagementPortVFsCount(t *testing.T) {
+	cfg := Config{
+		Networks: []NetworkConfig{
+			{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 4, MgmtPortVFsCount: 3},
+		},
+	}
+
+	err := cfg.validateAndSetDefaults()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mgmt_port_vfs_count")
+}
+
 func TestIsKindMode(t *testing.T) {
 	vmConfig := Config{
 		VMs: []VMConfig{{Name: "vm1"}},

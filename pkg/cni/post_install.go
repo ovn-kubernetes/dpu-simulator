@@ -54,6 +54,11 @@ func PostInstall(cfg *config.Config, cmdExec platform.CommandExecutor) error {
 
 	log.Info("\n=== Post-install (all clusters): restoring CoreDNS / local-path-provisioner and rolling out ===")
 	for _, clusterCfg := range cfg.ClustersOrderedForInstall() {
+		if deferSystemDeploymentsUntilExternalOVNK(cfg, clusterCfg.Name) {
+			log.Info("Leaving CoreDNS / local-path-provisioner suspended on cluster %s until external OVN-Kubernetes install completes", clusterCfg.Name)
+			continue
+		}
+
 		kubeconfigPath := k8s.GetKubeconfigPath(clusterCfg.Name, cfg.Kubernetes.GetKubeconfigDir())
 		cniMgr, err := NewCNIManagerWithKubeconfigFile(cfg, kubeconfigPath, cmdExec)
 		if err != nil {
@@ -65,6 +70,13 @@ func PostInstall(cfg *config.Config, cmdExec platform.CommandExecutor) error {
 	}
 
 	return nil
+}
+
+func deferSystemDeploymentsUntilExternalOVNK(cfg *config.Config, clusterName string) bool {
+	if cfg.ShouldInstallOVNKubernetes() {
+		return false
+	}
+	return cfg.GetCNIType(clusterName) == config.CNIOVNKubernetes || cfg.DPUClusterNeedsOVNK(clusterName)
 }
 
 // suspendCoreDNSAndLocalPathProvisioner scales CoreDNS and local-path-provisioner
