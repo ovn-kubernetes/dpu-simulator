@@ -30,7 +30,13 @@ spec:
           volumeMounts:
             - name: device-plugin-socket
               mountPath: /var/lib/kubelet/device-plugins
+            - name: device-info
+              mountPath: /var/run/k8s.cni.cncf.io/devinfo/dp
       volumes:
         - name: device-plugin-socket
           hostPath:
             path: /var/lib/kubelet/device-plugins
+        - name: device-info
+          hostPath:
+            path: /var/run/k8s.cni.cncf.io/devinfo/dp
+            type: DirectoryOrCreate
