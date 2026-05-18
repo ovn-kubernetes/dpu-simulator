@@ -55,7 +55,7 @@ func (m *CNIManager) writeOVNKubernetesHelmValues(mode ovnkMode, clusterName, ov
 		values["ovnkube-node-dpu-host"] = map[string]any{
 			"nodeMgmtPortNetdev":     m.config.DPUHostManagementPortNetDevName(),
 			"mgmtPortVFResourceName": deviceplugin.VFResourceName,
-			"mgmtPortVFsCount":       1,
+			"mgmtPortVFsCount":       m.config.DPUHostManagementPortVFsCount(),
 			"gatewayOpts":            fmt.Sprintf("--gateway-interface=%s", m.config.DPUHostGatewayInterface()),
 		}
 	case ovnkModeDPU:

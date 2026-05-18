@@ -297,6 +297,8 @@ func (m *CNIManager) runHelmInstall(mode ovnkMode, clusterName, ovnkRepoPath, ap
 				"--set", "tags.ovnkube-node-dpu-host=true",
 				"--set", "global.enableOvnKubeIdentity=false",
 				"--set", fmt.Sprintf("ovnkube-node-dpu-host.nodeMgmtPortNetdev=%s", dpuHostMgmtPort),
+				"--set", fmt.Sprintf("ovnkube-node-dpu-host.mgmtPortVFResourceName=%s", deviceplugin.VFResourceName),
+				"--set", fmt.Sprintf("ovnkube-node-dpu-host.mgmtPortVFsCount=%d", m.config.DPUHostManagementPortVFsCount()),
 				"--set", fmt.Sprintf("ovnkube-node-dpu-host.gatewayOpts=--gateway-interface=%s", dpuHostGw),
 				"--set", "global.simulateDpu=true",
 			)

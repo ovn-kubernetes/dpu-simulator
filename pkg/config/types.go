@@ -141,6 +141,10 @@ type NetworkConfig struct {
 	UseOVS     bool   `yaml:"use_ovs,omitempty"`
 	AttachTo   string `yaml:"attach_to,omitempty"`
 	NumPairs   int    `yaml:"num_pairs,omitempty"`
+	// MgmtPortVFsCount is the number of simulated VFs requested by
+	// ovnkube-node for default and primary UDN management ports. It only
+	// applies to HostToDpu networks.
+	MgmtPortVFsCount int `yaml:"mgmt_port_vfs_count,omitempty"`
 }
 
 // BareMetalConfig represents a bare metal configuration
