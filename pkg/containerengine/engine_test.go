@@ -89,6 +89,30 @@ func (f *fakeExecutor) GetArchitecture() (platform.Architecture, error)         
 func (f *fakeExecutor) HasSudo() bool                                                 { return true }
 func (f *fakeExecutor) String() string                                                { return "fake" }
 
+func TestNewContainerEngineHonorsKindExperimentalProvider(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want Name
+	}{
+		{name: "docker", env: "docker", want: EngineDocker},
+		{name: "podman", env: "podman", want: EnginePodman},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(kindExperimentalProviderEnv, tc.env)
+			engine, err := NewContainerEngine(&fakeExecutor{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if engine.Name() != tc.want {
+				t.Fatalf("got %q, want %q", engine.Name(), tc.want)
+			}
+		})
+	}
+}
+
 func TestDockerBuildCommand(t *testing.T) {
 	fx := &fakeExecutor{}
 	e := NewDockerEngine(fx)
