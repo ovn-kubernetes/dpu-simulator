@@ -91,7 +91,7 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "global.gatewayOpts", value: gatewayOpts},
 			helmValue{key: "ovnkube-node-dpu-host.nodeMgmtPortNetdev", value: m.config.DPUHostManagementPortNetDevName()},
 			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFResourceName", value: deviceplugin.VFResourceName},
-			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFsCount", value: 1},
+			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFsCount", value: m.config.DPUHostManagementPortVFsCount()},
 			helmValue{key: "ovnkube-node-dpu-host.gatewayOpts", value: fmt.Sprintf("--gateway-interface=%s", m.config.DPUHostGatewayInterface())},
 		)
 		return overrides, nil

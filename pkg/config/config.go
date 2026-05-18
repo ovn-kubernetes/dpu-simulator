@@ -18,6 +18,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const defaultDPUHostMgmtPortVFsCount = 2
+
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -102,12 +104,30 @@ func (c *Config) validateAndSetDefaults() error {
 			if c.Networks[i].NumPairs <= 0 {
 				c.Networks[i].NumPairs = 1
 			}
+			availableMgmtPortVFs := c.Networks[i].NumPairs - 2
+			if c.Networks[i].MgmtPortVFsCount > 0 && c.Networks[i].MgmtPortVFsCount > availableMgmtPortVFs {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' must be <= num_pairs-2 (%d) because eth0-0 and eth0-1 are reserved",
+					i, net.Name, availableMgmtPortVFs))
+			}
+			if c.Networks[i].MgmtPortVFsCount <= 0 {
+				defaultVal := defaultDPUHostMgmtPortVFs(c.Networks[i].NumPairs)
+				if defaultVal > availableMgmtPortVFs {
+					defaultVal = availableMgmtPortVFs
+				}
+				if defaultVal < 0 {
+					defaultVal = 0
+				}
+				c.Networks[i].MgmtPortVFsCount = defaultVal
+			}
 		} else {
 			if net.BridgeName == "" {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'bridge_name' is required", i, net.Name))
 			}
 			if net.NumPairs > 0 {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'num_pairs' is not allowed for type %s", i, net.Name, net.Type))
+			}
+			if net.MgmtPortVFsCount > 0 {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' is not allowed for type %s", i, net.Name, net.Type))
 			}
 			if c.Networks[i].Mode == "" {
 				c.Networks[i].Mode = "nat"
@@ -896,6 +916,27 @@ func (c *Config) GetHostToDpuNumPairs() int {
 		return 1
 	}
 	return net.NumPairs
+}
+
+// DPUHostManagementPortVFsCount returns how many simulated VFs ovnkube-node
+// should request for default and primary UDN management ports.
+func (c *Config) DPUHostManagementPortVFsCount() int {
+	net := c.GetHostToDpuNetwork()
+	if net == nil {
+		return 1
+	}
+	return net.MgmtPortVFsCount
+}
+
+func defaultDPUHostMgmtPortVFs(numPairs int) int {
+	available := numPairs - 2
+	if available <= 0 {
+		return 0
+	}
+	if available < defaultDPUHostMgmtPortVFsCount {
+		return available
+	}
+	return defaultDPUHostMgmtPortVFsCount
 }
 
 // GetNetworkByName returns the network configuration by name
