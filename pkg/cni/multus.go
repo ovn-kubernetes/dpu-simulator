@@ -71,6 +71,11 @@ func (m *CNIManager) installMultus(clusterName, apiServerHost string) error {
 
 	log.Info("✓ Multus is installed")
 
+	if m.clusterUsesOVNKubernetes(clusterName) && !m.config.ShouldInstallOVNKubernetes() {
+		log.Info("Skipping Multus readiness wait until external OVN-Kubernetes Helm install creates the readiness indicator")
+		return nil
+	}
+
 	// Wait for Multus daemonset pods to be ready.
 	if err := m.k8sClient.WaitForPodsReady("kube-system", "name=multus", 3*time.Minute); err != nil {
 		return fmt.Errorf("multus pods are not ready: %w", err)
