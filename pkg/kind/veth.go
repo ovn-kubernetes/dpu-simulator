@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
@@ -64,7 +65,10 @@ func (m *KindManager) CleanupVethTopology(cmdExec platform.CommandExecutor, pair
 // Host container:  pf     (takes over the Kind IP from eth0)
 // DPU  container:  pfrep
 func (m *KindManager) CreateVethTopology(cmdExec platform.CommandExecutor, pairs []config.HostDPUPair, numPairs int) error {
-	subnet, usedIPs := m.GetKindSubnetAndAllocatedIPs()
+	gatewaySubnet, usedGatewayIPs, err := m.prepareDPUGatewayNetwork(cmdExec, pairs)
+	if err != nil {
+		return err
+	}
 
 	for pairIdx, pair := range pairs {
 		log.Info("Setting up veth topology for pair %d: %s <-> %s (%d data channels)",
@@ -86,20 +90,117 @@ func (m *KindManager) CreateVethTopology(cmdExec platform.CommandExecutor, pairs
 			return fmt.Errorf("failed to create data veths for pair %d: %w", pairIdx, err)
 		}
 
-		if m.config.IsOffloadDPU() && subnet != nil {
-			gwIP, allocErr := network.GetFreeIPv4AddressInSubnet(subnet, usedIPs)
+		if m.config.IsOffloadDPU() && gatewaySubnet != nil {
+			gwIP, allocErr := network.GetFreeIPv4AddressInSubnet(gatewaySubnet, usedGatewayIPs)
 			if allocErr != nil {
 				return fmt.Errorf("failed to allocate gateway veth IP for pair %d: %w", pairIdx, allocErr)
 			}
-			if err := assignDpuHostGatewayIP(hostContainerExec, pair.HostNode, gwIP, subnet); err != nil {
+			if err := assignDpuHostGatewayIP(hostContainerExec, pair.HostNode, gwIP, gatewaySubnet); err != nil {
 				return fmt.Errorf("failed to assign gateway veth IP for pair %d: %w", pairIdx, err)
 			}
-			usedIPs = append(usedIPs, gwIP)
+			usedGatewayIPs = append(usedGatewayIPs, gwIP)
 		}
 	}
 
 	log.Info("✓ Veth topology created for %d host-DPU pairs (%d data channels each)", len(pairs), numPairs)
 	return nil
+}
+
+// prepareDPUGatewayNetwork ensures the shared gateway bridge exists, connects
+// each DPU container to it, and returns the subnet plus IPs already consumed by
+// the bridge gateway and DPU containers. Host-side gateway veth allocation uses
+// the returned used IP list to avoid collisions.
+func (m *KindManager) prepareDPUGatewayNetwork(cmdExec platform.CommandExecutor, pairs []config.HostDPUPair) (*net.IPNet, []net.IP, error) {
+	if !m.config.IsOffloadDPU() {
+		return nil, nil, nil
+	}
+
+	gatewaySubnet, err := parseIPv4CIDR(m.config.DPUHostGatewaySubnet())
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid DPU host gateway subnet: %w", err)
+	}
+
+	if err := m.ensureDPUGatewayNetwork(cmdExec, gatewaySubnet); err != nil {
+		return nil, nil, err
+	}
+
+	usedIPs := []net.IP{containerBridgeGatewayIP(gatewaySubnet)}
+	for _, pair := range pairs {
+		ip, err := m.ensureDPUConnectedToGatewayNetwork(cmdExec, pair.DPUNode)
+		if err != nil {
+			return nil, nil, err
+		}
+		usedIPs = append(usedIPs, ip)
+	}
+
+	return gatewaySubnet, usedIPs, nil
+}
+
+// ensureDPUGatewayNetwork creates the Docker/Podman bridge network used for
+// simulated DPU gateway traffic. The network must use the configured gateway
+// subnet because OVN-Kubernetes programs gateway router external addresses from
+// that same subnet.
+func (m *KindManager) ensureDPUGatewayNetwork(cmdExec platform.CommandExecutor, subnet *net.IPNet) error {
+	networkName := m.config.DPUKindGatewayNetworkName()
+	inspectCmd := fmt.Sprintf("%s network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' %s",
+		platform.ShQuote(m.containerBin), platform.ShQuote(networkName))
+	if stdout, _, err := cmdExec.Execute(inspectCmd); err == nil {
+		if !strings.Contains(stdout, subnet.String()) {
+			return fmt.Errorf("DPU gateway network %s already exists with subnet %q, expected %s",
+				networkName, strings.TrimSpace(stdout), subnet.String())
+		}
+		return nil
+	}
+
+	log.Info("Creating DPU gateway network %s (%s)", networkName, subnet.String())
+	if err := cmdExec.RunCmd(log.LevelInfo, m.containerBin, "network", "create", "--subnet", subnet.String(), networkName); err != nil {
+		return fmt.Errorf("failed to create DPU gateway network %s: %w", networkName, err)
+	}
+	return nil
+}
+
+// ensureDPUConnectedToGatewayNetwork attaches a DPU Kind container to the
+// gateway bridge network and returns the container IP allocated by the
+// container runtime. That IP is reserved so the paired host gateway veth does
+// not receive an overlapping address from the same subnet.
+func (m *KindManager) ensureDPUConnectedToGatewayNetwork(cmdExec platform.CommandExecutor, dpuNode string) (net.IP, error) {
+	networkName := m.config.DPUKindGatewayNetworkName()
+	ip, err := m.getContainerNetworkIP(cmdExec, dpuNode, networkName)
+	if err == nil {
+		return ip, nil
+	}
+
+	log.Info("Connecting DPU node %s to gateway network %s", dpuNode, networkName)
+	if err := cmdExec.RunCmd(log.LevelInfo, m.containerBin, "network", "connect", networkName, dpuNode); err != nil {
+		return nil, fmt.Errorf("failed to connect DPU node %s to gateway network %s: %w", dpuNode, networkName, err)
+	}
+
+	ip, err = m.waitForContainerNetworkIP(cmdExec, dpuNode, networkName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read DPU node %s IP on gateway network %s: %w", dpuNode, networkName, err)
+	}
+	return ip, nil
+}
+
+func (m *KindManager) waitForContainerNetworkIP(cmdExec platform.CommandExecutor, containerName, networkName string) (net.IP, error) {
+	const (
+		interval = 500 * time.Millisecond
+		timeout  = 10 * time.Second
+	)
+
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		ip, err := m.getContainerNetworkIP(cmdExec, containerName, networkName)
+		if err == nil {
+			return ip, nil
+		}
+		lastErr = err
+		if time.Now().Add(interval).After(deadline) {
+			return nil, fmt.Errorf("timed out after %s: %w", timeout, lastErr)
+		}
+		time.Sleep(interval)
+	}
 }
 
 // createDataVeths creates numPairs veth pairs and moves them into the
@@ -205,16 +306,15 @@ func getKindNodeNetworkCIDR(exec platform.CommandExecutor) (net.IP, *net.IPNet, 
 	return ip, ipNet, nil
 }
 
-// assignGatewayVethIP assigns gwIP to eth0-0 inside the host container and
-// removes the auto-created subnet route so normal (API) traffic still goes via eth0.
+// assignGatewayVethIP assigns gwIP to eth0-0 inside the host container. This
+// address is on the DPU gateway subnet, separate from the Kind/KAPI subnet on
+// eth0.
 func assignDpuHostGatewayIP(hostContainerExec platform.CommandExecutor, hostNode string, gwIP net.IP, subnet *net.IPNet) error {
 	ones, _ := subnet.Mask.Size()
 	gwCIDR := fmt.Sprintf("%s/%d", gwIP, ones)
 	gwIf := fmt.Sprintf(network.HostDataIfFmt, 0)
 
-	// noprefixroute prevents the kernel from adding a connected subnet
-	// route on eth0-0, which would conflict with the same route on eth0.
-	if err := hostContainerExec.RunCmd(log.LevelDebug, "ip", "addr", "add", gwCIDR, "dev", gwIf, "noprefixroute"); err != nil {
+	if err := hostContainerExec.RunCmd(log.LevelDebug, "ip", "addr", "add", gwCIDR, "dev", gwIf); err != nil {
 		return fmt.Errorf("failed to assign %s to %s in %s: %w", gwCIDR, gwIf, hostNode, err)
 	}
 

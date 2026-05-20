@@ -141,6 +141,9 @@ type NetworkConfig struct {
 	UseOVS     bool   `yaml:"use_ovs,omitempty"`
 	AttachTo   string `yaml:"attach_to,omitempty"`
 	NumPairs   int    `yaml:"num_pairs,omitempty"`
+	// GatewaySubnet is the subnet used by simulated DPU gateway interfaces.
+	// It only applies to HostToDpu networks.
+	GatewaySubnet string `yaml:"gateway_subnet,omitempty"`
 	// MgmtPortVFsCount is the number of simulated VFs requested by
 	// ovnkube-node for default and primary UDN management ports. It only
 	// applies to HostToDpu networks.

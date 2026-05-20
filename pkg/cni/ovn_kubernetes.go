@@ -282,7 +282,7 @@ func (m *CNIManager) runHelmInstall(mode ovnkMode, clusterName, ovnkRepoPath, ap
 			overrides = append(overrides,
 				helmValue{key: "tags.ovs-node", value: false},
 				helmValue{key: "global.enableOvnKubeIdentity", value: true},
-				helmValue{key: "global.gatewayOpts", value: fmt.Sprintf("--gateway-interface=%s", m.config.GatewayInterfaces(clusterName))},
+				helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
 			)
 		}
 	case ovnkModeDPU:

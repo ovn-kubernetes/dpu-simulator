@@ -18,7 +18,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const defaultDPUHostMgmtPortVFsCount = 2
+const (
+	defaultDPUHostMgmtPortVFsCount = 2
+	defaultDPUHostGatewaySubnet    = "172.30.0.0/24"
+	defaultKindDPUGatewayNetwork   = "dpu-sim-gateway"
+	defaultKindDPUGatewayInterface = "eth1"
+)
 
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
@@ -104,6 +109,12 @@ func (c *Config) validateAndSetDefaults() error {
 			if c.Networks[i].NumPairs <= 0 {
 				c.Networks[i].NumPairs = 1
 			}
+			if c.Networks[i].GatewaySubnet == "" {
+				c.Networks[i].GatewaySubnet = defaultDPUHostGatewaySubnet
+			}
+			if err := validateIPv4CIDRCapacity(c.Networks[i].GatewaySubnet, c.kindDPUGatewaySubnetRequiredIPs()); err != nil {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'gateway_subnet' must be a valid CIDR: %v", i, net.Name, err))
+			}
 			availableMgmtPortVFs := c.Networks[i].NumPairs - 2
 			if c.Networks[i].MgmtPortVFsCount > 0 && c.Networks[i].MgmtPortVFsCount > availableMgmtPortVFs {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' must be <= num_pairs-2 (%d) because eth0-0 and eth0-1 are reserved",
@@ -128,6 +139,9 @@ func (c *Config) validateAndSetDefaults() error {
 			}
 			if net.MgmtPortVFsCount > 0 {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' is not allowed for type %s", i, net.Name, net.Type))
+			}
+			if net.GatewaySubnet != "" {
+				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'gateway_subnet' is not allowed for type %s", i, net.Name, net.Type))
 			}
 			if c.Networks[i].Mode == "" {
 				c.Networks[i].Mode = "nat"
@@ -928,6 +942,38 @@ func (c *Config) DPUHostManagementPortVFsCount() int {
 	return net.MgmtPortVFsCount
 }
 
+// DPUHostGatewaySubnet returns the subnet used for simulated DPU gateway
+// router addresses.
+func (c *Config) DPUHostGatewaySubnet() string {
+	net := c.GetHostToDpuNetwork()
+	if net == nil || net.GatewaySubnet == "" {
+		return defaultDPUHostGatewaySubnet
+	}
+	return net.GatewaySubnet
+}
+
+// DPUKindGatewayNetworkName returns the container network carrying simulated
+// DPU gateway traffic in Kind mode.
+func (c *Config) DPUKindGatewayNetworkName() string {
+	return defaultKindDPUGatewayNetwork
+}
+
+// kindDPUGatewaySubnetRequiredIPs returns the minimum usable IPs needed by the
+// DPU gateway container network. Docker/Podman consumes the first usable IP for
+// the bridge gateway, each DPU node consumes one IP when it connects to the
+// gateway network, and each paired host node gets one veth IP from the same
+// subnet for OVN-Kubernetes gateway traffic.
+func (c *Config) kindDPUGatewaySubnetRequiredIPs() int {
+	if !c.IsKindMode() || !c.IsOffloadDPU() {
+		return 0
+	}
+	pairs := c.GetHostDPUPairs("")
+	if len(pairs) == 0 {
+		return 0
+	}
+	return 1 + 2*len(pairs)
+}
+
 func defaultDPUHostMgmtPortVFs(numPairs int) int {
 	available := numPairs - 2
 	if available <= 0 {
@@ -1204,8 +1250,23 @@ func (c *Config) GatewayInterfaces(clusterName string) string {
 	gatewayIf := K8sNetworkName
 	if c.IsKindMode() {
 		gatewayIf = KindK8sNetworkName
+		if c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
+			gatewayIf = defaultKindDPUGatewayInterface
+		}
 	}
 	return gatewayIf
+}
+
+// GatewayOpts returns the OVN-Kubernetes gateway options for the given
+// cluster. In Kind DPU mode, OVN's gateway interface is on the simulator
+// gateway network, and the DPU host gateway subnet tells ovnkube how to derive
+// gateway router addresses for paired host nodes.
+func (c *Config) GatewayOpts(clusterName string) string {
+	opts := fmt.Sprintf("--gateway-interface=%s", c.GatewayInterfaces(clusterName))
+	if c.IsKindMode() && c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
+		opts = fmt.Sprintf("%s --gateway-router-subnet=%s", opts, c.DPUHostGatewaySubnet())
+	}
+	return opts
 }
 
 // DPUHostGatewayInterface returns the gateway interface name for DPU-Host mode

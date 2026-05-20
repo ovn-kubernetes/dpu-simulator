@@ -2,6 +2,7 @@ package kind
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,12 +127,12 @@ func (m *KindManager) setupOVNKubernetesOffloadToDPUOVS(cmdExec platform.Command
 	for _, pair := range pairs {
 		dpuExec := platform.NewDockerExecutor(pair.DPUNode, m.containerBin)
 
-		encapIP, err := m.getContainerIP(cmdExec, pair.DPUNode)
+		encapIP, err := m.getContainerNetworkIP(cmdExec, pair.DPUNode, m.config.DPUKindGatewayNetworkName())
 		if err != nil {
-			return fmt.Errorf("failed to get IP for DPU container %s: %w", pair.DPUNode, err)
+			return fmt.Errorf("failed to get gateway IP for DPU container %s: %w", pair.DPUNode, err)
 		}
 
-		if err := cni.SetupOVNKOffloadToDPUNodeOVS(dpuExec, pair.DPUNode, pair.HostNode, encapIP); err != nil {
+		if err := cni.SetupOVNKOffloadToDPUNodeOVS(dpuExec, pair.DPUNode, pair.HostNode, encapIP.String()); err != nil {
 			return err
 		}
 	}
@@ -142,19 +143,33 @@ func (m *KindManager) setupOVNKubernetesOffloadToDPUOVS(cmdExec platform.Command
 // getContainerIP returns the IP address of a Kind container on the kind
 // Docker network.
 func (m *KindManager) getContainerIP(cmdExec platform.CommandExecutor, containerName string) (string, error) {
+	ip, err := m.getContainerNetworkIP(cmdExec, containerName, "kind")
+	if err != nil {
+		return "", err
+	}
+	return ip.String(), nil
+}
+
+func (m *KindManager) getContainerNetworkIP(cmdExec platform.CommandExecutor, containerName, networkName string) (net.IP, error) {
 	// CommandExecutor.Execute runs via sh -c; keep the inspect format in single quotes
 	// and POSIX-quote the binary and container name (same style as RunCommandInDir).
 	shCmd := platform.ShQuote(m.containerBin) +
-		" inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' " +
+		fmt.Sprintf(" inspect -f '{{ (index .NetworkSettings.Networks %q).IPAddress }}' ", networkName) +
 		platform.ShQuote(containerName)
 	stdout, stderr, err := cmdExec.ExecuteWithTimeout(shCmd, 30*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("failed to get IP for container %s: %w\nstderr: %s", containerName, err, strings.TrimSpace(stderr))
+		return nil, fmt.Errorf("failed to get IP for container %s on network %s: %w\nstderr: %s", containerName, networkName, err, strings.TrimSpace(stderr))
 	}
-	ip := strings.TrimSpace(stdout)
-	if ip == "" {
-		return "", fmt.Errorf("IP is empty for container %s", containerName)
+	ipStr := strings.TrimSpace(stdout)
+	if ipStr == "" || ipStr == "<no value>" {
+		return nil, fmt.Errorf("IP is empty for container %s on network %s", containerName, networkName)
 	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP %q for container %s on network %s", ipStr, containerName, networkName)
+	}
+
 	return ip, nil
 }
 

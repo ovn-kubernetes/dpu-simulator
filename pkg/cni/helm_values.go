@@ -76,7 +76,6 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 		pullPolicy = "IfNotPresent"
 	}
 
-	gatewayOpts := fmt.Sprintf("--gateway-interface=%s", m.config.GatewayInterfaces(clusterName))
 	switch mode {
 	case ovnkModeFull:
 		return imageHelmValues("global.image", imageRepo, imageTag, pullPolicy), nil
@@ -88,7 +87,7 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "tags.ovnkube-identity", value: false},
 			helmValue{key: "global.enableOvnKubeIdentity", value: false},
 			helmValue{key: "global.simulateDpu", value: true},
-			helmValue{key: "global.gatewayOpts", value: gatewayOpts},
+			helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
 			helmValue{key: "ovnkube-node-dpu-host.nodeMgmtPortNetdev", value: m.config.DPUHostManagementPortNetDevName()},
 			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFResourceName", value: deviceplugin.VFResourceName},
 			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFsCount", value: m.config.DPUHostManagementPortVFsCount()},
@@ -102,7 +101,7 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "tags.ovnkube-identity", value: false},
 			helmValue{key: "global.enableOvnKubeIdentity", value: false},
 			helmValue{key: "global.simulateDpu", value: true},
-			helmValue{key: "global.gatewayOpts", value: gatewayOpts},
+			helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
 			helmValue{key: "global.dpuHostGatewayRepresentorInterface", value: m.config.DPUHostGatewayRepresentorInterface()},
 			helmValue{key: "global.mtu", value: 1400},
 		)
@@ -249,7 +248,8 @@ func (m *CNIManager) writeFRRK8sRemoteEnv(dpuClusterName, remoteKubeconfigPath, 
 		return err
 	}
 	envPath := filepath.Join(dir, fmt.Sprintf("%s-frr-k8s.env", dpuClusterName))
-	env := fmt.Sprintf("FRR_K8S_REMOTE_KUBECONFIG=%q\nFRR_K8S_HOST_KUBECONFIG=%q\nFRR_K8S_REMOTE_NODE_MAP=%q\n", remoteKubeconfigPath, hostKubeconfigPath, strings.Join(entries, ","))
+	env := fmt.Sprintf("FRR_K8S_REMOTE_KUBECONFIG=%q\nFRR_K8S_HOST_KUBECONFIG=%q\nFRR_K8S_REMOTE_NODE_MAP=%q\nDPU_SIM_GATEWAY_NETWORK=%q\nDPU_SIM_GATEWAY_SUBNET=%q\n",
+		remoteKubeconfigPath, hostKubeconfigPath, strings.Join(entries, ","), m.config.DPUKindGatewayNetworkName(), m.config.DPUHostGatewaySubnet())
 	if err := os.WriteFile(envPath, []byte(env), 0o644); err != nil {
 		return fmt.Errorf("failed to write FRR-K8S env file %s: %w", envPath, err)
 	}

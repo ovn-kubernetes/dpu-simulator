@@ -10,6 +10,7 @@ networks:
   - name: "host-to-dpu-link"
     type: "HostToDpu"
     num_pairs: 16
+    gateway_subnet: "172.30.0.0/24"
     mgmt_port_vfs_count: 3
 
 # Kind cluster configuration: one Kind cluster per kubernetes.clusters entry.
