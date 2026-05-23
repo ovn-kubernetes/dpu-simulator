@@ -36,7 +36,7 @@ func (m *CNIManager) GenerateOVNKubernetesHelmValues(clusterName string, require
 }
 
 func (m *CNIManager) writeOVNKubernetesHelmValues(mode ovnkMode, clusterName, ovnImage string, requireHostCredentials bool) error {
-	overrides, err := m.ovnkHelmOverrides(mode, clusterName, ovnImage, requireHostCredentials)
+	overrides, err := m.ovnkHelmOverrides(mode, clusterName, ovnImage, requireHostCredentials, true)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,10 @@ func (m *CNIManager) writeOVNKubernetesHelmValues(mode ovnkMode, clusterName, ov
 	return nil
 }
 
-func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage string, requireHostCredentials bool) ([]helmValue, error) {
+// ovnkHelmOverrides returns the DPU-simulator-specific Helm overrides.
+// includeDPUHostMgmtPortResource is only needed when the rendered chart will
+// request management-port VFs, such as manual primary UDN installs.
+func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage string, requireHostCredentials, includeDPUHostMgmtPortResource bool) ([]helmValue, error) {
 	imageRepo, imageTag := splitImageRef(ovnImage)
 	pullPolicy := "Always"
 	if m.config.IsKindMode() && !m.config.IsRegistryEnabled() {
@@ -89,10 +92,14 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "global.simulateDpu", value: true},
 			helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
 			helmValue{key: "ovnkube-node-dpu-host.nodeMgmtPortNetdev", value: m.config.DPUHostManagementPortNetDevName()},
-			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFResourceName", value: deviceplugin.VFResourceName},
-			helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFsCount", value: m.config.DPUHostManagementPortVFsCount()},
 			helmValue{key: "ovnkube-node-dpu-host.gatewayOpts", value: fmt.Sprintf("--gateway-interface=%s", m.config.DPUHostGatewayInterface())},
 		)
+		if includeDPUHostMgmtPortResource {
+			overrides = append(overrides,
+				helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFResourceName", value: deviceplugin.VFResourceName},
+				helmValue{key: "ovnkube-node-dpu-host.mgmtPortVFsCount", value: m.config.DPUHostManagementPortVFsCount()},
+			)
+		}
 		return overrides, nil
 	case ovnkModeDPU:
 		overrides := imageHelmValues("global.dpuImage", imageRepo, imageTag, pullPolicy)
