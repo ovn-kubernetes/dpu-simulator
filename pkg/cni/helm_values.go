@@ -70,8 +70,9 @@ func (m *CNIManager) writeOVNKubernetesHelmValues(mode ovnkMode, clusterName, ov
 }
 
 // ovnkHelmOverrides returns the DPU-simulator-specific Helm overrides.
-// includeDPUHostMgmtPortResource is only needed when the rendered chart will
-// request management-port VFs, such as manual primary UDN installs.
+// includeDPUHostMgmtPortResource requests management-port VFs for DPU-host
+// installs. This keeps the management-port allocation on the device-plugin
+// path instead of relying on the explicit netdev name after redeploys.
 func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage string, requireHostCredentials, includeDPUHostMgmtPortResource bool) ([]helmValue, error) {
 	imageRepo, imageTag := splitImageRef(ovnImage)
 	pullPolicy := "Always"

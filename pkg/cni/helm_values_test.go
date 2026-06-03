@@ -3,6 +3,8 @@ package cni
 import (
 	"testing"
 
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/deviceplugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,29 @@ func TestAppendHelmSetArgsPreservesOrder(t *testing.T) {
 		"--set", "tags.ovs-node=false",
 		"--set", "ovnkube-node-dpu-host.mgmtPortVFsCount=5",
 	}, args)
+}
+
+func TestDPUHostHelmOverridesIncludeMgmtPortResource(t *testing.T) {
+	cfg := &config.Config{
+		Networks: []config.NetworkConfig{
+			{
+				Name:             "host-to-dpu",
+				Type:             config.HostToDpuNetworkType,
+				NumPairs:         8,
+				MgmtPortVFsCount: 3,
+			},
+		},
+	}
+	m := &CNIManager{config: cfg}
+
+	overrides, err := m.ovnkHelmOverrides(ovnkModeDPUHost, "dpu-sim-host", DefaultOVNImage, true, true)
+	require.NoError(t, err)
+	values, err := helmValuesToMap(overrides)
+	require.NoError(t, err)
+
+	dpuHostValues := values["ovnkube-node-dpu-host"].(map[string]any)
+	assert.Equal(t, deviceplugin.VFResourceName, dpuHostValues["mgmtPortVFResourceName"])
+	assert.Equal(t, 3, dpuHostValues["mgmtPortVFsCount"])
 }
 
 func TestPodCIDRWithPerNodePrefix(t *testing.T) {

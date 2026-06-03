@@ -253,9 +253,7 @@ func (m *CNIManager) installOVNKubernetes(clusterName string, k8sIP string) erro
 //   - DPU:      values-single-node-zone-dpu.yaml, global.dpuImage.*, host credentials
 func (m *CNIManager) runHelmInstall(mode ovnkMode, clusterName, ovnkRepoPath, apiServerURL, podCIDR, serviceCIDR, ovnImage string) error {
 	chartPath := filepath.Join(ovnkRepoPath, "helm", "ovn-kubernetes")
-	// Embedded installs do not enable network segmentation, so keep the DPU
-	// host on the explicit management netdev instead of requesting VFs.
-	overrides, err := m.ovnkHelmOverrides(mode, clusterName, ovnImage, true, false)
+	overrides, err := m.ovnkHelmOverrides(mode, clusterName, ovnImage, true, true)
 	if err != nil {
 		return err
 	}
