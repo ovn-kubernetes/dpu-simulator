@@ -4,8 +4,7 @@
 // can allocate management-port and pod VFs through the standard device
 // plugin mechanism.
 //
-// One gRPC server is started per resource pool defined in
-// pkg/deviceplugin.ResourcePools.
+// One gRPC server is started per resource pool built from MGMT_PORT_VFS_COUNT.
 package main
 
 import (
@@ -26,14 +25,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	pools := deviceplugin.ResourcePools
-	if len(pools) == 0 {
-		klog.Errorf("No resource pools configured")
-		os.Exit(1)
-	}
+	mgmtPortVFsCount := deviceplugin.MgmtPortVFsCountFromEnv()
+	pools := deviceplugin.BuildResourcePools(mgmtPortVFsCount)
+	klog.Infof("Configured mgmt_port_vfs_count=%d", mgmtPortVFsCount)
 
 	for _, pool := range pools {
-		klog.Infof("Configured pool: resource=%s socket=%s regex=%s", pool.ResourceName, pool.SocketName, pool.IfaceRegex)
+		klog.Infof("Configured pool: resource=%s socket=%s selector=%s", pool.ResourceName, pool.SocketName, pool.MatcherDescription())
 	}
 
 	g, ctx := errgroup.WithContext(ctx)

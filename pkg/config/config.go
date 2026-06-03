@@ -19,13 +19,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	defaultDPUHostMgmtPortVFsCount = 2
-	defaultDPUHostGatewaySubnet    = "172.30.0.0/24"
-	defaultKindDPUGatewayNetwork   = "dpu-sim-gateway"
-	defaultKindDPUGatewayInterface = "eth1"
-)
-
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -995,10 +988,10 @@ func defaultDPUHostMgmtPortVFs(numPairs int) int {
 	if available <= 0 {
 		return 0
 	}
-	if available < defaultDPUHostMgmtPortVFsCount {
+	if available < DefaultMgmtPortVFsCount {
 		return available
 	}
-	return defaultDPUHostMgmtPortVFsCount
+	return DefaultMgmtPortVFsCount
 }
 
 // GetNetworkByName returns the network configuration by name

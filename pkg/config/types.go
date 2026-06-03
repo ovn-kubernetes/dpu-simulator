@@ -17,13 +17,6 @@ const (
 	HostType             = "host"
 	DpuType              = "dpu"
 
-	// RegistryContainerName is the Docker container name for the local registry
-	DefaultRegistryContainerName = "dpu-sim-registry"
-	// RegistryPort is the host port the registry listens on
-	DefaultRegistryPort = "5000"
-	// RegistryImage is the Docker image used for the registry
-	DefaultRegistryImage = "registry:2"
-
 	// OVNKubernetesModeInstall deploys OVN-Kubernetes with Helm as part of dpu-sim.
 	OVNKubernetesModeInstall = "install"
 	// OVNKubernetesModeValuesOnly generates Helm values and support artifacts but

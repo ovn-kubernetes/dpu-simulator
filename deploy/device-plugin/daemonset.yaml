@@ -25,6 +25,9 @@ spec:
         - name: device-plugin
           image: DPU_SIM_DP_IMAGE
           imagePullPolicy: IfNotPresent
+          env:
+            - name: MGMT_PORT_VFS_COUNT
+              value: "DPU_SIM_MGMT_PORT_VFS_COUNT"
           securityContext:
             privileged: true
           volumeMounts:

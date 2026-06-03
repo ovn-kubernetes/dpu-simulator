@@ -4,7 +4,7 @@
 // registration so that OVN-Kubernetes DPU-host mode can allocate management-
 // port and pod VFs independently through the standard device plugin mechanism.
 //
-// Pools are defined in pkg/deviceplugin.ResourcePools.
+// Pools are built from pkg/deviceplugin.BuildResourcePools.
 package main
 
 import (
@@ -50,7 +50,7 @@ func (p *DpuSimDevicePlugin) discoverDevices() error {
 
 	p.devices = nil
 	for _, iface := range ifaces {
-		if p.pool.IfaceRegex.MatchString(iface.Name) {
+		if p.pool.MatchesIface(iface.Name) {
 			p.devices = append(p.devices, &pluginapi.Device{
 				ID:     iface.Name,
 				Health: pluginapi.Healthy,
@@ -60,7 +60,7 @@ func (p *DpuSimDevicePlugin) discoverDevices() error {
 	}
 
 	if len(p.devices) == 0 {
-		return fmt.Errorf("[%s] no interfaces matching %s found", p.pool.ResourceName, p.pool.IfaceRegex)
+		return fmt.Errorf("[%s] no interfaces matching %s found", p.pool.ResourceName, p.pool.MatcherDescription())
 	}
 	klog.Infof("[%s] discovered %d device(s)", p.pool.ResourceName, len(p.devices))
 	return nil

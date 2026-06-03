@@ -196,7 +196,7 @@ func (m *CNIManager) installOVNKubernetes(clusterName string, k8sIP string) erro
 		if err := m.labelNodesForDPUHost(clusterName); err != nil {
 			return fmt.Errorf("failed to label DPU-host nodes: %w", err)
 		}
-		if err := deviceplugin.DeployDevicePlugin(m.k8sClient, dpImageRef); err != nil {
+		if err := deviceplugin.DeployDevicePlugin(m.k8sClient, dpImageRef, m.config.DPUHostManagementPortVFsCount()); err != nil {
 			return fmt.Errorf("failed to deploy device plugin on DPU-host cluster: %w", err)
 		}
 	case ovnkModeDPU:
