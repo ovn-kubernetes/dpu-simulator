@@ -61,7 +61,7 @@ func (m *CNIManager) InstallCNIAndAddons(cniType config.CNIType, clusterName, k8
 
 	var preCNIAddons, postCNIAddons []config.AddonType
 	if m.needsMultusBeforeOVNKubernetes(clusterName) {
-		preCNIAddons, postCNIAddons = partitionAddons(orderedAddons, config.AddonMultus)
+		preCNIAddons, postCNIAddons = partitionPreCNIAddons(orderedAddons)
 	} else {
 		postCNIAddons = orderedAddons
 	}
@@ -101,6 +101,8 @@ func (m *CNIManager) installPreCNIAddon(addonType config.AddonType, clusterName,
 	switch addonType {
 	case config.AddonMultus:
 		return m.installMultus(clusterName, apiServerHost, true)
+	case config.AddonWhereabouts:
+		return m.installWhereabouts(clusterName)
 	default:
 		return fmt.Errorf("addon %s cannot be installed before the CNI", addonType)
 	}
@@ -118,9 +120,10 @@ func (m *CNIManager) InstallAddons(addons []config.AddonType, clusterName, apiSe
 	return nil
 }
 
-// resolveAddonInstallOrder returns addons sorted for install. Whereabouts is
-// placed immediately before Multus when both are configured, since Multus IPAM
-// may depend on it.
+// resolveAddonInstallOrder returns addons sorted so Whereabouts comes
+// immediately before Multus when both are configured, since Multus IPAM may
+// depend on it. InstallCNIAndAddons may move both ahead of the primary CNI on
+// DPU-host clusters; this relative order is preserved within each phase.
 func resolveAddonInstallOrder(addons []config.AddonType) []config.AddonType {
 	ordered := make([]config.AddonType, 0, len(addons))
 
@@ -170,15 +173,16 @@ func (m *CNIManager) needsMultusBeforeOVNKubernetes(clusterName string) bool {
 	return false
 }
 
-// partitionAddons splits addons into those that run before and after the primary
-// CNI install. Matching entries are moved to pre; all others stay in post.
-func partitionAddons(addons []config.AddonType, target config.AddonType) (pre, post []config.AddonType) {
+// partitionPreCNIAddons splits addons for DPU-host OVN-K installs: Multus and
+// Whereabouts run before the primary CNI (preserving resolveAddonInstallOrder).
+func partitionPreCNIAddons(addons []config.AddonType) (pre, post []config.AddonType) {
 	for _, addon := range addons {
-		if addon == target {
+		switch addon {
+		case config.AddonMultus, config.AddonWhereabouts:
 			pre = append(pre, addon)
-			continue
+		default:
+			post = append(post, addon)
 		}
-		post = append(post, addon)
 	}
 	return pre, post
 }
