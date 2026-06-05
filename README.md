@@ -40,7 +40,7 @@ All these DPUs have common simularities, some we can emulate better than others.
 
 ### Kind Mode Features
 - ⚡ **Fast iteration** - clusters deploy in seconds
-- 🐳 Uses Docker containers instead of VMs
+- 🐳 Uses Docker/Podman containers instead of VMs
 - 💾 Lower resource usage than VMs
 - 🔄 Easy cluster recreation for testing
 
@@ -91,6 +91,14 @@ For Kind-based deployments:
 ✓ kind is installed
 ✓ All dependencies are available
 ```
+
+For Kind deployments with **`kubernetes.offload_dpu: true`**, the host and DPU
+container networks must be routable from the host. Docker and Podman with
+host-visible Linux bridge networking are supported. Rootless Podman with
+`pasta` is not supported for this topology because it does not expose bridge
+interfaces on the host for dpu-sim to configure forwarding between the Kind and
+DPU gateway networks. This limitation can be removed once OVN-Kubernetes
+provides Kubernetes API reachability through an admin-policy based route.
 
 ### Required Packages
 

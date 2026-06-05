@@ -382,7 +382,7 @@ func TestKindDPUGatewayOpts(t *testing.T) {
 	}
 	require.NoError(t, cfg.validateAndSetDefaults())
 
-	assert.Equal(t, "--gateway-interface=eth1 --gateway-router-subnet=172.31.0.0/24", cfg.GatewayOpts("dpu"))
+	assert.Equal(t, "--gateway-interface=eth1 --gateway-router-subnet=172.31.0.0/24 --gateway-nexthop=172.31.0.1", cfg.GatewayOpts("dpu"))
 	assert.Equal(t, "--gateway-interface=eth0", cfg.GatewayOpts("host"))
 }
 

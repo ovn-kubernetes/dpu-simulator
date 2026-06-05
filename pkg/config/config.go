@@ -14,6 +14,7 @@ import (
 
 	"github.com/ovn-kubernetes/dpu-simulator/lib/dpusim"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/netutil"
 
 	"gopkg.in/yaml.v3"
 )
@@ -958,6 +959,21 @@ func (c *Config) DPUKindGatewayNetworkName() string {
 	return defaultKindDPUGatewayNetwork
 }
 
+// DPUKindGatewayNextHop returns the container bridge gateway for the simulated
+// DPU gateway subnet. Docker and Podman assign the first usable address to the
+// bridge when creating a network with an explicit subnet.
+func (c *Config) DPUKindGatewayNextHop() string {
+	_, subnet, err := net.ParseCIDR(c.DPUHostGatewaySubnet())
+	if err != nil {
+		return ""
+	}
+	nextHop, err := netutil.GetFirstUsableIPv4AddressInSubnet(subnet)
+	if err != nil {
+		return ""
+	}
+	return nextHop.String()
+}
+
 // kindDPUGatewaySubnetRequiredIPs returns the minimum usable IPs needed by the
 // DPU gateway container network. Docker/Podman consumes the first usable IP for
 // the bridge gateway, each DPU node consumes one IP when it connects to the
@@ -1260,11 +1276,15 @@ func (c *Config) GatewayInterfaces(clusterName string) string {
 // GatewayOpts returns the OVN-Kubernetes gateway options for the given
 // cluster. In Kind DPU mode, OVN's gateway interface is on the simulator
 // gateway network, and the DPU host gateway subnet tells ovnkube how to derive
-// gateway router addresses for paired host nodes.
+// gateway router addresses for paired host nodes. The gateway nexthop is the
+// container bridge gateway on that same subnet.
 func (c *Config) GatewayOpts(clusterName string) string {
 	opts := fmt.Sprintf("--gateway-interface=%s", c.GatewayInterfaces(clusterName))
 	if c.IsKindMode() && c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
 		opts = fmt.Sprintf("%s --gateway-router-subnet=%s", opts, c.DPUHostGatewaySubnet())
+		if nextHop := c.DPUKindGatewayNextHop(); nextHop != "" {
+			opts = fmt.Sprintf("%s --gateway-nexthop=%s", opts, nextHop)
+		}
 	}
 	return opts
 }

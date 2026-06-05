@@ -9,6 +9,7 @@ import (
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/config"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/netutil"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/network"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/platform"
 )
@@ -120,17 +121,34 @@ func (m *KindManager) prepareDPUGatewayNetwork(cmdExec platform.CommandExecutor,
 		return nil, nil, fmt.Errorf("invalid DPU host gateway subnet: %w", err)
 	}
 
+	if err := m.ensureGatewayRoutingSupported(cmdExec); err != nil {
+		return nil, nil, err
+	}
+
 	if err := m.ensureDPUGatewayNetwork(cmdExec, gatewaySubnet); err != nil {
 		return nil, nil, err
 	}
 
-	usedIPs := []net.IP{containerBridgeGatewayIP(gatewaySubnet)}
+	// Docker and Podman assign the first usable address to the bridge
+	// gateway when creating a network with an explicit subnet.
+	bridgeGatewayIP, err := netutil.GetFirstUsableIPv4AddressInSubnet(gatewaySubnet)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to determine DPU gateway bridge IP: %w", err)
+	}
+	usedIPs := []net.IP{bridgeGatewayIP}
 	for _, pair := range pairs {
 		ip, err := m.ensureDPUConnectedToGatewayNetwork(cmdExec, pair.DPUNode)
 		if err != nil {
 			return nil, nil, err
 		}
 		usedIPs = append(usedIPs, ip)
+	}
+
+	// Podman materializes the bridge device only after a container is
+	// attached to the network. Configure host routing after the DPU
+	// containers are connected so the bridge sysctls exist.
+	if err := m.setupDPUGatewayRouting(cmdExec, gatewaySubnet); err != nil {
+		return nil, nil, err
 	}
 
 	return gatewaySubnet, usedIPs, nil

@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/discovery"
 	discoverycache "k8s.io/client-go/discovery/cached/memory"
@@ -406,6 +407,72 @@ func (c *K8sClient) WaitForDeploymentAvailable(namespace, name string, timeout t
 
 			if isDeploymentAvailable(deployment) {
 				log.Info("✓ Deployment %s/%s is available", namespace, name)
+				return nil
+			}
+		}
+	}
+}
+
+// WaitForDeploymentPodsReady waits until a Deployment is available and all
+// pods matching its selector are Ready.
+func (c *K8sClient) WaitForDeploymentPodsReady(namespace, name string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	log.Info("Waiting for deployment %s/%s pods to be ready...", namespace, name)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for deployment %s/%s pods to be ready", namespace, name)
+		case <-ticker.C:
+			deployment, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+			if err != nil {
+				log.Warn("Warning: failed to get deployment %s/%s: %v", namespace, name, err)
+				continue
+			}
+			if deployment.Status.ObservedGeneration < deployment.Generation || !isDeploymentAvailable(deployment) {
+				continue
+			}
+			desiredReplicas := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desiredReplicas = *deployment.Spec.Replicas
+			}
+
+			selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+			if err != nil {
+				return fmt.Errorf("deployment %s/%s has invalid selector: %w", namespace, name, err)
+			}
+			if selector.Empty() {
+				selector = labels.Nothing()
+			}
+
+			pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+				LabelSelector: selector.String(),
+			})
+			if err != nil {
+				log.Warn("Warning: failed to list pods for deployment %s/%s: %v", namespace, name, err)
+				continue
+			}
+			if len(pods.Items) == 0 {
+				continue
+			}
+
+			allReady := true
+			readyCount := int32(0)
+			for _, pod := range pods.Items {
+				if IsPodReady(&pod) {
+					readyCount++
+				} else {
+					allReady = false
+				}
+			}
+			log.Debug("Deployment %s/%s pods ready: %d/%d listed, desired %d", namespace, name, readyCount, len(pods.Items), desiredReplicas)
+			if allReady && readyCount >= desiredReplicas {
+				log.Info("✓ Deployment %s/%s pods are ready: %d/%d", namespace, name, readyCount, desiredReplicas)
 				return nil
 			}
 		}

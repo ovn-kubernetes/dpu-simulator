@@ -71,6 +71,8 @@ jobs:
           sudo systemctl restart docker
 
       - name: Deploy Kind clusters (OVN-Kubernetes from source)
+        env:
+          KIND_EXPERIMENTAL_PROVIDER: docker
         run: ./bin/dpu-sim --config config-kind-ovnk-offload.yaml
 
       - name: Verify clusters are ready
@@ -110,4 +112,6 @@ jobs:
 
       - name: Cleanup
         if: always()
+        env:
+          KIND_EXPERIMENTAL_PROVIDER: docker
         run: ./bin/dpu-sim --config config-kind-ovnk-offload.yaml --cleanup || true

@@ -67,6 +67,9 @@ func PostInstall(cfg *config.Config, cmdExec platform.CommandExecutor) error {
 		log.Info("Resuming system deployments on cluster %s", clusterCfg.Name)
 		cniMgr.resumeCoreDNSAndLocalPathProvisioner()
 		cniMgr.rolloutRestartCoreDNSAndLocalPathProvisioner()
+		if err := cniMgr.waitForCoreDNSReady(clusterCfg.Name); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -111,6 +114,13 @@ func (m *CNIManager) rolloutRestartCoreDNSAndLocalPathProvisioner() {
 	if err := m.k8sClient.RolloutRestartDeployment("local-path-storage", "local-path-provisioner", true); err != nil {
 		log.Warn("failed to restart local-path-provisioner: %v", err)
 	}
+}
+
+func (m *CNIManager) waitForCoreDNSReady(clusterName string) error {
+	if err := m.k8sClient.WaitForDeploymentPodsReady("kube-system", "coredns", 5*time.Minute); err != nil {
+		return fmt.Errorf("coredns pods did not become ready on cluster %s: %w", clusterName, err)
+	}
+	return nil
 }
 
 // ensureDPUHostSystemDeployments patches CoreDNS and (if present)
