@@ -1,0 +1,252 @@
+name: Kind TFT
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: dpu-sim config path in the dpu-simulator repository.
+        required: false
+        type: string
+        default: ci/config-kind-ovnk-offload.yaml
+      tft-config:
+        description: TFT config path in the caller repository; empty uses the dpu-sim full suite.
+        required: false
+        type: string
+        default: ""
+      tft-repo-url:
+        description: TFT repository URL.
+        required: false
+        type: string
+        default: https://github.com/ovn-kubernetes/kubernetes-traffic-flow-tests
+      tft-ref:
+        description: TFT git ref.
+        required: false
+        type: string
+        default: main
+      tft-env:
+        description: Newline-separated TFT environment overrides.
+        required: false
+        type: string
+        default: ""
+      artifact-prefix:
+        description: Prefix for uploaded artifacts.
+        required: false
+        type: string
+        default: kind-dpu-offload
+
+jobs:
+  kind-tft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DPU_SIM_ROOT: ${{ github.workspace }}/dpu-simulator
+      OVN_KUBERNETES_ROOT: ${{ github.workspace }}/ovn-kubernetes
+      TFT_ROOT: ${{ github.workspace }}/kubernetes-traffic-flow-tests
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Checkout dpu-simulator
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: dpu-simulator
+
+      - name: Resolve config paths
+        id: paths
+        env:
+          CONFIG: ${{ inputs.config }}
+          TFT_CONFIG: ${{ inputs.tft-config }}
+        run: |
+          config_path="${DPU_SIM_ROOT}/${CONFIG}"
+          if [ -n "${TFT_CONFIG}" ]; then
+            tft_config_path="${GITHUB_WORKSPACE}/${TFT_CONFIG}"
+          else
+            tft_config_path="${DPU_SIM_ROOT}/ci/tft-config/full-suite.yaml"
+          fi
+          if [ ! -f "${config_path}" ]; then
+            echo "::error::dpu-sim config not found: ${config_path}"
+            exit 1
+          fi
+          if [ ! -f "${tft_config_path}" ]; then
+            echo "::error::TFT config not found: ${tft_config_path}"
+            exit 1
+          fi
+          {
+            echo "config_path=${config_path}"
+            echo "config_workdir=${DPU_SIM_ROOT}"
+            echo "tft_config_path=${tft_config_path}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # CI depends on https://github.com/ovn-org/ovn-kubernetes/pull/6270
+      # This can be dropped with dpu-sim auto-clone of OVN-Kubernetes.
+      - name: Checkout OVN-Kubernetes (master)
+        run: |
+          if [ -d "${OVN_KUBERNETES_ROOT}/.git" ]; then
+            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin master
+            git -C "${OVN_KUBERNETES_ROOT}" checkout --detach FETCH_HEAD
+          else
+            rm -rf "${OVN_KUBERNETES_ROOT}"
+            git clone --depth=1 https://github.com/ovn-org/ovn-kubernetes "${OVN_KUBERNETES_ROOT}"
+          fi
+
+      - name: Checkout kubernetes-traffic-flow-tests
+        env:
+          TFT_REPO_URL: ${{ inputs.tft-repo-url }}
+          TFT_REF: ${{ inputs.tft-ref }}
+        run: |
+          tft_repo="${TFT_ROOT}"
+          if [ -d "${tft_repo}/.git" ]; then
+            git -C "${tft_repo}" remote set-url origin "${TFT_REPO_URL}"
+          else
+            rm -rf "${tft_repo}"
+            git clone --no-checkout --depth=1 "${TFT_REPO_URL}" "${tft_repo}"
+          fi
+          git -C "${tft_repo}" fetch --depth=1 origin "${TFT_REF}"
+          git -C "${tft_repo}" checkout --detach FETCH_HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dpu-simulator/go.mod
+          cache: true
+          cache-dependency-path: dpu-simulator/go.sum
+
+      - name: Install libvirt development headers
+        run: sudo apt-get update && sudo apt-get install -y libvirt-dev
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up Python for traffic flow tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install kind
+        run: |
+          KIND_VERSION=v0.31.0
+          curl -fsSLo /tmp/kind-linux-amd64 "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          curl -fsSLo /tmp/kind-linux-amd64.sha256sum "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64.sha256sum"
+          (cd /tmp && sha256sum -c kind-linux-amd64.sha256sum)
+          chmod +x /tmp/kind-linux-amd64
+          sudo mv /tmp/kind-linux-amd64 /usr/local/bin/kind
+
+      - name: Build dpu-sim
+        working-directory: ${{ env.DPU_SIM_ROOT }}
+        run: make build
+
+      - name: Disable containerd image store
+        # Workaround for https://github.com/kubernetes-sigs/kind/issues/3795
+        # Docker 27+ on ubuntu-24.04 enables the containerd snapshotter by default,
+        # which prevents kind from loading images into the cluster.
+        run: |
+          sudo mkdir -p /etc/docker
+          [ -s "/etc/docker/daemon.json" ] && {
+            cat "/etc/docker/daemon.json" | jq '. + {"features":{"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.$$
+          } || {
+            echo '{"features":{"containerd-snapshotter": false}}' | sudo tee /etc/docker/daemon.$$
+          }
+          sudo mv -f /etc/docker/daemon.$$ /etc/docker/daemon.json
+          sudo systemctl restart docker
+
+      - name: Deploy Kind clusters (OVN-Kubernetes from source)
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          KIND_EXPERIMENTAL_PROVIDER: docker
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" --config "${CONFIG_PATH}" --ovn-kubernetes-path "${OVN_KUBERNETES_ROOT}"
+
+      - name: Verify clusters are ready
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        run: |
+          kubectl wait --for=condition=Ready nodes --all \
+            --kubeconfig kubeconfig/dpu-sim-host.kubeconfig --timeout=25m
+          kubectl wait --for=condition=Ready nodes --all \
+            --kubeconfig kubeconfig/dpu-sim-dpu.kubeconfig --timeout=25m
+
+      - name: TFT Python venv
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" tft venv --config "${CONFIG_PATH}" --tft-repo-path "${TFT_ROOT}"
+
+      - name: Run traffic flow tests
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+          CONFIG_WORKDIR: ${{ steps.paths.outputs.config_workdir }}
+          TFT_CONFIG_PATH: ${{ steps.paths.outputs.tft_config_path }}
+          TFT_ENV: ${{ inputs.tft-env }}
+        run: |
+          tft_env_args=()
+          while IFS= read -r entry || [ -n "${entry}" ]; do
+            [ -z "${entry}" ] && continue
+            key="${entry%%=*}"
+            if [ "${entry}" = "${key}" ]; then
+              echo "::error::tft-env entries must be KEY=VALUE: ${entry}"
+              exit 1
+            fi
+            if [[ ! "${key}" =~ ^TFT_[A-Z0-9_]+$ ]]; then
+              echo "::error::invalid tft-env key: ${key}"
+              exit 1
+            fi
+            tft_env_args+=("${entry}")
+          done <<< "${TFT_ENV}"
+
+          env "${tft_env_args[@]}" \
+            TFT_KUBECONFIG="${CONFIG_WORKDIR}/kubeconfig/dpu-sim-host.kubeconfig" \
+            "${DPU_SIM_ROOT}/bin/dpu-sim" tft run --config "${CONFIG_PATH}" --tft-config "${TFT_CONFIG_PATH}" --tft-repo-path "${TFT_ROOT}" --check
+
+      - name: Export kind logs on failure
+        if: failure()
+        env:
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-host-kind 2>/dev/null || \
+            kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-host 2>/dev/null || true
+          kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-dpu-kind 2>/dev/null || \
+            kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-dpu 2>/dev/null || true
+
+      - name: Upload kind logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-prefix }}-logs
+          path: /tmp/${{ inputs.artifact-prefix }}-logs
+          if-no-files-found: ignore
+
+      - name: Collect TFT results on failure
+        if: failure()
+        env:
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          results_dir="${TFT_ROOT}/ft-logs"
+          artifact_dir="/tmp/${ARTIFACT_PREFIX}-tft-results"
+          if [ -d "${results_dir}" ]; then
+            mkdir -p "${artifact_dir}"
+            cp -a "${results_dir}/." "${artifact_dir}/"
+          fi
+
+      - name: Upload TFT results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-prefix }}-tft-results
+          path: /tmp/${{ inputs.artifact-prefix }}-tft-results
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          KIND_EXPERIMENTAL_PROVIDER: docker
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" --config "${CONFIG_PATH}" --cleanup || true
