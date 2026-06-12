@@ -23,6 +23,21 @@ on:
         required: false
         type: string
         default: main
+      ovn-kubernetes-repo-url:
+        description: OVN-Kubernetes repository URL.
+        required: false
+        type: string
+        default: https://github.com/ovn-kubernetes/ovn-kubernetes
+      ovn-kubernetes-ref:
+        description: OVN-Kubernetes git ref.
+        required: false
+        type: string
+        default: master
+      deploy-mode:
+        description: DPU-Sim deploy mode.
+        required: false
+        type: string
+        default: overlay
       tft-env:
         description: Newline-separated TFT environment overrides.
         required: false
@@ -61,6 +76,7 @@ jobs:
         env:
           CONFIG: ${{ inputs.config }}
           TFT_CONFIG: ${{ inputs.tft-config }}
+          DEPLOY_MODE: ${{ inputs.deploy-mode }}
         run: |
           config_path="${DPU_SIM_ROOT}/${CONFIG}"
           if [ -n "${TFT_CONFIG}" ]; then
@@ -68,6 +84,13 @@ jobs:
           else
             tft_config_path="${DPU_SIM_ROOT}/ci/tft-config/full-suite.yaml"
           fi
+          case "${DEPLOY_MODE}" in
+            overlay|no-overlay) ;;
+            *)
+              echo "::error::invalid deploy-mode: ${DEPLOY_MODE}"
+              exit 1
+              ;;
+          esac
           if [ ! -f "${config_path}" ]; then
             echo "::error::dpu-sim config not found: ${config_path}"
             exit 1
@@ -80,18 +103,23 @@ jobs:
             echo "config_path=${config_path}"
             echo "config_workdir=${DPU_SIM_ROOT}"
             echo "tft_config_path=${tft_config_path}"
+            echo "deploy_mode=${DEPLOY_MODE}"
           } >> "${GITHUB_OUTPUT}"
 
-      # CI depends on https://github.com/ovn-org/ovn-kubernetes/pull/6270
-      # This can be dropped with dpu-sim auto-clone of OVN-Kubernetes.
-      - name: Checkout OVN-Kubernetes (master)
+      - name: Checkout OVN-Kubernetes
+        env:
+          OVN_KUBERNETES_REPO_URL: ${{ inputs.ovn-kubernetes-repo-url }}
+          OVN_KUBERNETES_REF: ${{ inputs.ovn-kubernetes-ref }}
         run: |
           if [ -d "${OVN_KUBERNETES_ROOT}/.git" ]; then
-            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin master
+            git -C "${OVN_KUBERNETES_ROOT}" remote set-url origin "${OVN_KUBERNETES_REPO_URL}"
+            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin "${OVN_KUBERNETES_REF}"
             git -C "${OVN_KUBERNETES_ROOT}" checkout --detach FETCH_HEAD
           else
             rm -rf "${OVN_KUBERNETES_ROOT}"
-            git clone --depth=1 https://github.com/ovn-org/ovn-kubernetes "${OVN_KUBERNETES_ROOT}"
+            git clone --depth=1 "${OVN_KUBERNETES_REPO_URL}" "${OVN_KUBERNETES_ROOT}"
+            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin "${OVN_KUBERNETES_REF}"
+            git -C "${OVN_KUBERNETES_ROOT}" checkout --detach FETCH_HEAD
           fi
 
       - name: Checkout kubernetes-traffic-flow-tests
@@ -154,7 +182,8 @@ jobs:
           sudo mv -f /etc/docker/daemon.$$ /etc/docker/daemon.json
           sudo systemctl restart docker
 
-      - name: Deploy Kind clusters (OVN-Kubernetes from source)
+      - name: Deploy Kind clusters (OVN-Kubernetes overlay)
+        if: ${{ steps.paths.outputs.deploy_mode == 'overlay' }}
         working-directory: ${{ steps.paths.outputs.config_workdir }}
         env:
           KIND_EXPERIMENTAL_PROVIDER: docker
@@ -162,7 +191,16 @@ jobs:
         run: |
           "${DPU_SIM_ROOT}/bin/dpu-sim" --config "${CONFIG_PATH}" --ovn-kubernetes-path "${OVN_KUBERNETES_ROOT}"
 
+      - name: Deploy no-overlay DPU simulator with Helm
+        if: ${{ steps.paths.outputs.deploy_mode == 'no-overlay' }}
+        working-directory: ${{ env.OVN_KUBERNETES_ROOT }}
+        env:
+          DPU_SIM_CONFIG: ${{ steps.paths.outputs.config_path }}
+          KIND_EXPERIMENTAL_PROVIDER: docker
+        run: ./contrib/kind-dpu-sim-no-overlay.sh
+
       - name: Verify clusters are ready
+        if: ${{ steps.paths.outputs.deploy_mode == 'overlay' }}
         working-directory: ${{ steps.paths.outputs.config_workdir }}
         run: |
           kubectl wait --for=condition=Ready nodes --all \
@@ -209,10 +247,15 @@ jobs:
         env:
           ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
         run: |
-          kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-host-kind 2>/dev/null || \
-            kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-host 2>/dev/null || true
-          kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-dpu-kind 2>/dev/null || \
-            kind export logs "/tmp/${ARTIFACT_PREFIX}-logs" --name dpu-sim-dpu 2>/dev/null || true
+          logs_dir="/tmp/${ARTIFACT_PREFIX}-logs"
+          mkdir -p "${logs_dir}"
+          for cluster in dpu-sim-host dpu-sim-host-kind dpu-sim-dpu dpu-sim-dpu-kind; do
+            kind export logs "${logs_dir}" --name "${cluster}" 2>/dev/null || true
+          done
+          kubectl --kubeconfig "${DPU_SIM_ROOT}/kubeconfig/dpu-sim-host.kubeconfig" get pods -A -o wide \
+            > "${logs_dir}/dpu-sim-host-pods.txt" 2>&1 || true
+          kubectl --kubeconfig "${DPU_SIM_ROOT}/kubeconfig/dpu-sim-dpu.kubeconfig" get pods -A -o wide \
+            > "${logs_dir}/dpu-sim-dpu-pods.txt" 2>&1 || true
 
       - name: Upload kind logs on failure
         if: failure()
@@ -249,4 +292,4 @@ jobs:
           KIND_EXPERIMENTAL_PROVIDER: docker
           CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
         run: |
-          "${DPU_SIM_ROOT}/bin/dpu-sim" --config "${CONFIG_PATH}" --cleanup || true
+          "${DPU_SIM_ROOT}/bin/dpu-sim" --config "${CONFIG_PATH}" --ovn-kubernetes-path "${OVN_KUBERNETES_ROOT}" --cleanup || true
