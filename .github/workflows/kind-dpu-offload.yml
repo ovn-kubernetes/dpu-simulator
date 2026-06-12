@@ -12,4 +12,18 @@ concurrency:
 
 jobs:
   kind-dpu-offload:
+    name: Kind DPU ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: overlay
+            deploy-mode: overlay
+            artifact-prefix: kind-dpu-offload
+          - name: no-overlay
+            deploy-mode: no-overlay
+            artifact-prefix: kind-dpu-no-overlay
     uses: ./.github/workflows/kind-tft.yml
+    with:
+      deploy-mode: ${{ matrix.deploy-mode }}
+      artifact-prefix: ${{ matrix.artifact-prefix }}

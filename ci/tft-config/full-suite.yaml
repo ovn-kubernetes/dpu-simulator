@@ -33,3 +33,27 @@ tft:
             sriov: true
             default_network: "default/ovn-primary"
         resource_name: "dpusim.io/vf"
+  - name: "kind-full-suite-secondary"
+    namespace: "default"
+    test_cases: "27-31,37-59"
+    duration: 5
+    pre_provision: true
+    connections:
+      - name: "iperf-tcp"
+        type: "iperf-tcp"
+        instances: 1
+        reverse: false
+        server:
+          - name: "dpu-sim-host-worker"
+            persistent: false
+        client:
+          - name: "dpu-sim-host-worker2"
+      - name: "http-curl"
+        type: "http"
+        instances: 1
+        reverse: false
+        server:
+          - name: "dpu-sim-host-worker"
+            persistent: false
+        client:
+          - name: "dpu-sim-host-worker2"
