@@ -1,7 +1,7 @@
 tft:
   - name: "kind-full-suite"
     namespace: "default"
-    test_cases: "1-26,35-36"
+    test_cases: "1-31,35-59"
     duration: 5
     pre_provision: true
     connections:
