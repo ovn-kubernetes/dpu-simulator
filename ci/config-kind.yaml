@@ -1,7 +1,7 @@
 # DPU Simulator Configuration - Kind (Container) Mode for CI
 #
-# Identical to config-kind.yaml but without the registry section.
-# Omitting the registry avoids a 5-minute OVN-K image build and
+# Identical to config-kind.yaml but with the registry disabled.
+# Disabling the registry avoids a 5-minute OVN-K image build and
 # prevents docker/podman engine conflicts on GitHub Actions runners.
 # CNI installation is skipped in CI (--skip-k8s) so no registry is needed.
 
@@ -14,38 +14,41 @@ kind:
   nodes:
     - name: "control-plane-host"
       k8s_role: "control-plane"
-      k8s_cluster: "dpu-sim-host-kind"
+      k8s_cluster: "dpu-sim-host"
     - name: "control-plane-dpu"
       k8s_role: "control-plane"
-      k8s_cluster: "dpu-sim-dpu-kind"
+      k8s_cluster: "dpu-sim-dpu"
     - name: "host-1-1"
       type: host
       k8s_role: "worker"
-      k8s_cluster: "dpu-sim-host-kind"
+      k8s_cluster: "dpu-sim-host"
     - name: "dpu-1-1"
       type: dpu
       k8s_role: "worker"
-      k8s_cluster: "dpu-sim-dpu-kind"
+      k8s_cluster: "dpu-sim-dpu"
       host: "host-1-1"
     - name: "host-2-1"
       type: host
       k8s_role: "worker"
-      k8s_cluster: "dpu-sim-host-kind"
+      k8s_cluster: "dpu-sim-host"
     - name: "dpu-2-1"
       type: dpu
       k8s_role: "worker"
-      k8s_cluster: "dpu-sim-dpu-kind"
+      k8s_cluster: "dpu-sim-dpu"
       host: "host-2-1"
 
 kubernetes:
   version: "1.33"
   offload_dpu: false
   clusters:
-    - name: "dpu-sim-host-kind"
+    - name: "dpu-sim-host"
       pod_cidr: "10.244.0.0/16"
       service_cidr: "10.245.0.0/16"
       cni: "ovn-kubernetes"
-    - name: "dpu-sim-dpu-kind"
+    - name: "dpu-sim-dpu"
       pod_cidr: "10.246.0.0/16"
       service_cidr: "10.247.0.0/16"
       cni: "ovn-kubernetes"
+
+registry:
+  enabled: false

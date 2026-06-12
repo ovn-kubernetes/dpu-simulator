@@ -1,0 +1,35 @@
+tft:
+  - name: "kind-full-suite"
+    namespace: "default"
+    test_cases: "1-26,35-36"
+    duration: 5
+    pre_provision: true
+    connections:
+      - name: "iperf-tcp"
+        type: "iperf-tcp"
+        instances: 1
+        reverse: false
+        server:
+          - name: "dpu-sim-host-worker"
+            persistent: false
+            sriov: true
+            default_network: "default/ovn-primary"
+        client:
+          - name: "dpu-sim-host-worker2"
+            sriov: true
+            default_network: "default/ovn-primary"
+        resource_name: "dpusim.io/vf"
+      - name: "http-curl"
+        type: "http"
+        instances: 1
+        reverse: false
+        server:
+          - name: "dpu-sim-host-worker"
+            persistent: false
+            sriov: true
+            default_network: "default/ovn-primary"
+        client:
+          - name: "dpu-sim-host-worker2"
+            sriov: true
+            default_network: "default/ovn-primary"
+        resource_name: "dpusim.io/vf"

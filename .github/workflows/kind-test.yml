@@ -53,7 +53,7 @@ jobs:
           sudo systemctl restart docker
 
       - name: Deploy kind clusters (infrastructure only, skip CNI)
-        run: ./bin/dpu-sim --config config-kind-ci.yaml --skip-k8s
+        run: ./bin/dpu-sim --config ci/config-kind.yaml --skip-k8s
 
       - name: Verify clusters are running
         run: |
@@ -62,14 +62,14 @@ jobs:
           # runtime provider matching what dpu-sim detected (docker vs podman).
           # Nodes are NotReady: dpu-sim disables kindnet in favour of OVN-Kubernetes,
           # which is installed separately. With --skip-k8s we verify node registration only.
-          kubectl get nodes --kubeconfig kubeconfig/dpu-sim-host-kind.kubeconfig
-          kubectl get nodes --kubeconfig kubeconfig/dpu-sim-dpu-kind.kubeconfig
+          kubectl get nodes --kubeconfig kubeconfig/dpu-sim-host.kubeconfig
+          kubectl get nodes --kubeconfig kubeconfig/dpu-sim-dpu.kubeconfig
 
       - name: Export kind logs on failure
         if: failure()
         run: |
-          kind export logs /tmp/kind-logs --name dpu-sim-host-kind 2>/dev/null || true
-          kind export logs /tmp/kind-logs --name dpu-sim-dpu-kind 2>/dev/null || true
+          kind export logs /tmp/kind-logs --name dpu-sim-host 2>/dev/null || true
+          kind export logs /tmp/kind-logs --name dpu-sim-dpu 2>/dev/null || true
 
       - name: Upload kind logs on failure
         if: failure()
@@ -81,4 +81,4 @@ jobs:
 
       - name: Cleanup
         if: always()
-        run: ./bin/dpu-sim --config config-kind-ci.yaml --cleanup || true
+        run: ./bin/dpu-sim --config ci/config-kind.yaml --cleanup || true
