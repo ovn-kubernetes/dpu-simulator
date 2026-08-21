@@ -71,3 +71,36 @@ func TestShouldUseWritableCNIBinDir(t *testing.T) {
 		})
 	}
 }
+
+func TestImagesFromManifest(t *testing.T) {
+	manifest := []byte(`
+apiVersion: apps/v1
+kind: DaemonSet
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: install
+        image: ghcr.io/flannel-io/flannel-cni-plugin:v1.9.1-flannel3
+      - image: "ghcr.io/flannel-io/flannel:v0.28.9"
+      containers:
+      - name: main
+        image: 'ghcr.io/flannel-io/flannel:v0.28.9'
+        env:
+        - name: NOT_AN_IMAGE
+          value: "image: fake/nope:1"
+`)
+	got := imagesFromManifest(manifest)
+	want := []string{
+		"ghcr.io/flannel-io/flannel-cni-plugin:v1.9.1-flannel3",
+		"ghcr.io/flannel-io/flannel:v0.28.9",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("imagesFromManifest = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("imagesFromManifest[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
