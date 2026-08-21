@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -491,6 +492,26 @@ func (m *KindManager) saveImageArchive(cmdExec platform.CommandExecutor, imageNa
 	}
 
 	log.Info("Saving image %s to archive (via %s save)...", imageName, m.containerBin)
+
+	// With Docker's containerd image store (default since Docker 27), saving a
+	// pulled multi-arch image produces an archive whose OCI index references
+	// every platform but only contains the host platform's blobs. Kind's
+	// "ctr images import --all-platforms" then fails with "content digest ...
+	// not found". Restrict the archive to the host platform (docker save
+	// --platform, Docker 28+). Podman archives are single-platform already.
+	if m.containerBin == "docker" {
+		hostPlatform := "linux/" + runtime.GOARCH
+		err := cmdExec.RunCmd(log.LevelInfo, m.containerBin,
+			"save", "--platform", hostPlatform, "-o", archivePath, imageName)
+		if err == nil {
+			return archivePath, cleanup, nil
+		}
+		// Older Docker (< 28) rejects --platform; single-platform images may
+		// also lack the requested platform entry. Fall through to a plain save.
+		log.Warn("docker save --platform %s failed for %s; retrying without platform filter: %v",
+			hostPlatform, imageName, err)
+	}
+
 	if err := cmdExec.RunCmd(log.LevelInfo, m.containerBin, "save", "-o", archivePath, imageName); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("failed to save image %q with %s: %w", imageName, m.containerBin, err)
