@@ -293,6 +293,7 @@ jobs:
           CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
           CONFIG_WORKDIR: ${{ steps.paths.outputs.config_workdir }}
           TFT_CONFIG_PATH: ${{ steps.paths.outputs.tft_config_path }}
+          TFT_ENABLE_TARGET_ACCESS_SUBTESTS: "true"
           TFT_ENV: ${{ inputs.tft-env }}
         run: |
           tft_env_args=()
