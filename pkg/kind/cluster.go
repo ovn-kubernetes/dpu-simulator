@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -173,8 +174,52 @@ func (m *KindManager) getContainerNetworkIP(cmdExec platform.CommandExecutor, co
 	return ip, nil
 }
 
+// preloadCNIImages pulls the images deployed by the flannel and Multus
+// manifests once on the host and loads them into every Kind cluster that uses
+// them. Without this, every node of every cluster pulls the images from their
+// registries independently (the Multus thick image alone is ~180MB). The
+// images are resolved from the manifests themselves, so they cannot drift from
+// what installFlannel/installMultus later apply. Neither manifest sets an
+// imagePullPolicy or uses the :latest tag, so the kubelet default
+// (IfNotPresent) uses the preloaded images. Failures are non-fatal: nodes fall
+// back to pulling the images directly.
+func (m *KindManager) preloadCNIImages(cmdExec platform.CommandExecutor) {
+	manifestClusters := map[string][]string{}
+	for _, clusterCfg := range m.config.Kubernetes.Clusters {
+		if clusterCfg.CNI == config.CNIFlannel {
+			manifestClusters[cni.FlannelManifestURL] = append(manifestClusters[cni.FlannelManifestURL], clusterCfg.Name)
+		}
+		for _, addon := range clusterCfg.Addons {
+			if addon == config.AddonMultus {
+				manifestClusters[cni.MultusManifestURL] = append(manifestClusters[cni.MultusManifestURL], clusterCfg.Name)
+				break
+			}
+		}
+	}
+
+	for url, clusters := range manifestClusters {
+		images, err := cni.ManifestImages(url)
+		if err != nil {
+			log.Warn("Failed to resolve images of manifest %s; nodes will pull them directly: %v", url, err)
+			continue
+		}
+		for _, image := range images {
+			log.Info("Pulling image %s once for clusters %v...", image, clusters)
+			if err := cmdExec.RunCmd(log.LevelInfo, m.containerBin, "pull", image); err != nil {
+				log.Warn("Failed to pull image %s; nodes will pull it directly: %v", image, err)
+				continue
+			}
+			if err := m.KindLoadImageIntoClusters(cmdExec, image, clusters); err != nil {
+				log.Warn("Failed to preload image %s into Kind clusters; nodes will pull it directly: %v", image, err)
+			}
+		}
+	}
+}
+
 // InstallCNI installs the CNI on every Kind cluster.
 func (m *KindManager) InstallCNI(cmdExec platform.CommandExecutor) error {
+	m.preloadCNIImages(cmdExec)
+
 	for _, clusterCfg := range m.config.ClustersOrderedForInstall() {
 		log.Info("\n--- Installing CNI on cluster %s ---", clusterCfg.Name)
 		cniType := clusterCfg.CNI
@@ -491,6 +536,26 @@ func (m *KindManager) saveImageArchive(cmdExec platform.CommandExecutor, imageNa
 	}
 
 	log.Info("Saving image %s to archive (via %s save)...", imageName, m.containerBin)
+
+	// With Docker's containerd image store (default since Docker 27), saving a
+	// pulled multi-arch image produces an archive whose OCI index references
+	// every platform but only contains the host platform's blobs. Kind's
+	// "ctr images import --all-platforms" then fails with "content digest ...
+	// not found". Restrict the archive to the host platform (docker save
+	// --platform, Docker 28+). Podman archives are single-platform already.
+	if m.containerBin == "docker" {
+		hostPlatform := "linux/" + runtime.GOARCH
+		err := cmdExec.RunCmd(log.LevelInfo, m.containerBin,
+			"save", "--platform", hostPlatform, "-o", archivePath, imageName)
+		if err == nil {
+			return archivePath, cleanup, nil
+		}
+		// Older Docker (< 28) rejects --platform; single-platform images may
+		// also lack the requested platform entry. Fall through to a plain save.
+		log.Warn("docker save --platform %s failed for %s; retrying without platform filter: %v",
+			hostPlatform, imageName, err)
+	}
+
 	if err := cmdExec.RunCmd(log.LevelInfo, m.containerBin, "save", "-o", archivePath, imageName); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("failed to save image %q with %s: %w", imageName, m.containerBin, err)
