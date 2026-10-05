@@ -154,12 +154,12 @@ func (m *KindManager) prepareDPUGatewayNetwork(cmdExec platform.CommandExecutor,
 	return gatewaySubnet, usedIPs, nil
 }
 
-// ensureDPUGatewayNetwork creates the Docker/Podman bridge network used for
-// simulated DPU gateway traffic. The network must use the configured gateway
-// subnet because OVN-Kubernetes programs gateway router external addresses from
-// that same subnet.
+// ensureDPUGatewayNetwork creates the Docker/Podman bridge network for
+// simulated DPU gateway traffic from DPUHostGatewaySubnet (type: gateway, or
+// legacy HostToDpu.gateway_subnet). The network must use that subnet because
+// OVN-Kubernetes programs gateway router external addresses from the same range.
 func (m *KindManager) ensureDPUGatewayNetwork(cmdExec platform.CommandExecutor, subnet *net.IPNet) error {
-	networkName := m.config.DPUKindGatewayNetworkName()
+	networkName := m.config.DPUGatewayNetworkName()
 	inspectCmd := fmt.Sprintf("%s network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' %s",
 		platform.ShQuote(m.containerBin), platform.ShQuote(networkName))
 	if stdout, _, err := cmdExec.Execute(inspectCmd); err == nil {
@@ -182,7 +182,7 @@ func (m *KindManager) ensureDPUGatewayNetwork(cmdExec platform.CommandExecutor, 
 // container runtime. That IP is reserved so the paired host gateway veth does
 // not receive an overlapping address from the same subnet.
 func (m *KindManager) ensureDPUConnectedToGatewayNetwork(cmdExec platform.CommandExecutor, dpuNode string) (net.IP, error) {
-	networkName := m.config.DPUKindGatewayNetworkName()
+	networkName := m.config.DPUGatewayNetworkName()
 	ip, err := m.getContainerNetworkIP(cmdExec, dpuNode, networkName)
 	if err == nil {
 		return ip, nil

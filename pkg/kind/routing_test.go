@@ -3,6 +3,8 @@ package kind
 import (
 	"strings"
 	"testing"
+
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/network"
 )
 
 func TestNetworkInfoFromDockerInspect(t *testing.T) {
@@ -95,8 +97,8 @@ func TestForwardRuleArgsIncludeSimulatorComment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	args := strings.Join(forwardRuleArgs("br-kind", "br-gw", src, dst), " ")
-	if !strings.Contains(args, "--comment dpu-simulator-kind-gateway-routing") {
+	args := strings.Join(network.IptablesAcceptRuleArgs(kindGatewayRoutingComment, "br-kind", "br-gw", src, dst), " ")
+	if !strings.Contains(args, "--comment "+kindGatewayRoutingComment) {
 		t.Fatalf("expected simulator comment in rule args, got %q", args)
 	}
 }

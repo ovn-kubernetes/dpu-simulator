@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,6 +410,11 @@ func getInterfaceNamesAndMACs(cfg *config.Config, vmConfig config.VMConfig) []if
 		if net.AttachTo != "any" && net.AttachTo != vmConfig.Type {
 			continue
 		}
+		if net.Type == config.GatewayNetworkName {
+			if vmConfig.Type != config.DpuType || vmConfig.Host == "" {
+				continue
+			}
+		}
 		mac := GenerateMACForNetwork(vmConfig.Name, net.Type)
 		if net.Type == config.K8sNetworkName && vmConfig.K8sNodeMAC != "" {
 			mac = vmConfig.K8sNodeMAC
@@ -468,8 +474,12 @@ func imageVirtualSizeBytes(cmdExec platform.CommandExecutor, imagePath string) (
 }
 
 // CreateCloudInitISO creates a cloud-init ISO for VM initialization.
-// If cfg is non-nil, udev rules are added to rename interfaces by MAC to common names (mgmt, k8s, eth0-0, rep0-0, etc.).
+// cfg must be non-nil; udev rules rename interfaces by MAC to common names (mgmt, k8s, eth0-0, rep0-0, etc.).
 func CreateCloudInitISO(cmdExec platform.CommandExecutor, sshConfig config.SSHConfig, vmConfig config.VMConfig, cfg *config.Config) (string, error) {
+	if cfg == nil {
+		return "", fmt.Errorf("config is nil")
+	}
+
 	vmName := vmConfig.Name
 	isoPath := filepath.Join(DefaultImageDir, fmt.Sprintf("%s-cloud-init.iso", vmName))
 
@@ -499,10 +509,7 @@ func CreateCloudInitISO(cmdExec platform.CommandExecutor, sshConfig config.SSHCo
 		return "", fmt.Errorf("failed to read SSH public key: %w", err)
 	}
 
-	var ifaceNameMACs []ifaceNameAndMAC
-	if cfg != nil {
-		ifaceNameMACs = getInterfaceNamesAndMACs(cfg, vmConfig)
-	}
+	ifaceNameMACs := getInterfaceNamesAndMACs(cfg, vmConfig)
 	userData := generateUserData(string(pubKeyData), sshConfig.User, sshConfig.Password, ifaceNameMACs, cfg, vmConfig)
 	userDataPath := filepath.Join(tempDir, "user-data")
 	if err := os.WriteFile(userDataPath, []byte(userData), 0o644); err != nil {
@@ -532,7 +539,7 @@ func generateMetaData(vmName string) string {
 // generateUserData generates cloud-init user-data content that sets ssh keys, passwords, updates packages, and disables
 // zram. ZRAM enables swap, which is not desirable for k8s, hense we disable it partially here. If ifaceNameMACs is non-empty,
 // udev rules rename interfaces (mgmt, k8s, eth0-0, etc.). NetworkManager is kept but only mgmt is managed (DHCP); other interfaces
-// are unmanaged.
+// are unmanaged. cfg must be non-nil.
 func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifaceNameAndMAC, cfg *config.Config, vmConfig config.VMConfig) string {
 	var sb strings.Builder
 
@@ -582,22 +589,49 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 			sb.WriteString("      " + line + "\n")
 		}
 		sb.WriteString("    permissions: \"0644\"\n")
-		// First-boot script: rename existing interfaces by MAC (udev NAME= applies on add; existing devs need ip link set).
+		// Boot script: udev names devices on later boots; the script also brings
+		// unmanaged links up, including the gateway representor not owned by CNI.
 		// Use read < file to get MAC without newline; cat would include newline and break the comparison.
-		scriptContent := "#!/bin/bash\n# dpu-sim: rename interfaces by MAC at first boot\n"
-		for _, m := range ifaceNameMACs {
-			scriptContent += fmt.Sprintf("for d in /sys/class/net/*; do [ -f \"$d/address\" ] || continue; ifname=$(basename \"$d\"); [ \"$ifname\" = lo ] && continue; read -r mac < \"$d/address\"; [ \"$mac\" = \"%s\" ] && ip link set dev \"$ifname\" name \"%s\" && break; done\n", m.MAC, m.Name)
-		}
 		sb.WriteString("  - path: /etc/dpu-sim-rename-ifaces.sh\n")
 		sb.WriteString("    content: |\n")
-		for _, line := range strings.Split(strings.TrimSuffix(scriptContent, "\n"), "\n") {
-			sb.WriteString("      " + line + "\n")
+		sb.WriteString("      #!/bin/bash\n")
+		sb.WriteString("      set -e\n")
+		sb.WriteString("      # dpu-sim: name and activate unmanaged interfaces at boot\n")
+		for _, m := range ifaceNameMACs {
+			sb.WriteString("      for d in /sys/class/net/*; do\n")
+			sb.WriteString("        [ -f \"$d/address\" ] || continue\n")
+			sb.WriteString("        ifname=$(basename \"$d\")\n")
+			sb.WriteString("        [ \"$ifname\" = lo ] && continue\n")
+			sb.WriteString("        read -r mac < \"$d/address\"\n")
+			sb.WriteString(fmt.Sprintf("        if [ \"$mac\" = \"%s\" ]; then\n", m.MAC))
+			sb.WriteString(fmt.Sprintf("          if [ \"$ifname\" != \"%s\" ]; then\n", m.Name))
+			sb.WriteString("            ip link set dev \"$ifname\" down\n")
+			sb.WriteString(fmt.Sprintf("            ip link set dev \"$ifname\" name \"%s\"\n", m.Name))
+			sb.WriteString("          fi\n")
+			sb.WriteString(fmt.Sprintf("          ip link set dev \"%s\" up\n", m.Name))
+			sb.WriteString("          break\n")
+			sb.WriteString("        fi\n")
+			sb.WriteString("      done\n")
 		}
 		sb.WriteString("    permissions: \"0755\"\n")
+		sb.WriteString("  - path: /etc/systemd/system/dpu-sim-interfaces.service\n")
+		sb.WriteString("    permissions: \"0644\"\n")
+		sb.WriteString("    content: |\n")
+		sb.WriteString("      [Unit]\n")
+		sb.WriteString("      Description=Activate simulator interfaces after udev naming\n")
+		sb.WriteString("      Wants=systemd-udev-settle.service\n")
+		sb.WriteString("      After=systemd-udev-settle.service\n")
+		sb.WriteString("      Before=NetworkManager.service dpu-sim-k8s-ip.service kubelet.service crio.service\n")
+		sb.WriteString("      [Service]\n")
+		sb.WriteString("      Type=oneshot\n")
+		sb.WriteString("      RemainAfterExit=yes\n")
+		sb.WriteString("      ExecStart=/etc/dpu-sim-rename-ifaces.sh\n")
+		sb.WriteString("      [Install]\n")
+		sb.WriteString("      WantedBy=multi-user.target\n")
 	}
 
 	// NetworkManager: manage only mgmt (DHCP). Other interfaces (k8s, host-to-dpu links) are unmanaged by MAC so it persists if interface names change.
-	if len(ifaceNameMACs) > 0 && cfg != nil {
+	if len(ifaceNameMACs) > 0 {
 		var unmanagedSpecs []string
 		for _, m := range ifaceNameMACs {
 			if m.Name != config.MgmtNetworkName {
@@ -605,7 +639,7 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 			}
 		}
 		// OVS/CNI interfaces used by OVN; keep them unmanaged so NetworkManager does not touch them.
-		unmanagedSpecs = append(unmanagedSpecs, "interface-name:br-int", "interface-name:brk8s", "interface-name:cni0", "interface-name:ovn-k8s-mp0")
+		unmanagedSpecs = append(unmanagedSpecs, "interface-name:br-int", "interface-name:brk8s", "interface-name:brgateway", "interface-name:cni0", "interface-name:ovn-k8s-mp0")
 		if len(unmanagedSpecs) > 0 {
 			sb.WriteString("  - path: /etc/NetworkManager/conf.d/90-dpu-sim-unmanaged.conf\n")
 			sb.WriteString("    content: |\n")
@@ -623,10 +657,10 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 			if err == nil {
 				cidr := fmt.Sprintf("%s/%d", vmConfig.K8sNodeIP, prefix)
 				gateway := k8sNet.Gateway
-				execStart := fmt.Sprintf("ip -4 addr add %s dev k8s 2>/dev/null || true", cidr)
+				execStart := fmt.Sprintf("ip link set dev k8s up && ip -4 addr replace %s dev k8s", cidr)
 				if gateway != "" {
 					// Default route via k8s gateway with metric 200 so mgmt stays primary.
-					execStart += fmt.Sprintf(" && ip -4 route add default via %s dev k8s metric 200 2>/dev/null || true", gateway)
+					execStart += fmt.Sprintf(" && ip -4 route replace default via %s dev k8s metric 200", gateway)
 				}
 				sb.WriteString("  - path: /etc/systemd/system/dpu-sim-k8s-ip.service\n")
 				sb.WriteString("    content: |\n")
@@ -645,6 +679,31 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 		}
 	}
 
+	// A oneshot assigns the gateway IP to the gateway NIC before OVN moves its address to OVS.
+	gatewayIP := ""
+	if cfg.IsOffloadDPU() && vmConfig.Type == config.DpuType {
+		gatewayIP, _ = cfg.VMGatewayIP(vmConfig.Name)
+	}
+	if gatewayIP != "" {
+		_, subnet, _ := net.ParseCIDR(cfg.DPUHostGatewaySubnet())
+		prefix, _ := subnet.Mask.Size()
+		sb.WriteString("  - path: /etc/systemd/system/dpu-sim-dpu-gateway.service\n")
+		sb.WriteString("    permissions: \"0644\"\n")
+		sb.WriteString("    content: |\n")
+		sb.WriteString("      [Unit]\n")
+		sb.WriteString("      Description=Set static DPU gateway address\n")
+		sb.WriteString("      Requires=dpu-sim-interfaces.service\n")
+		sb.WriteString("      After=dpu-sim-interfaces.service\n")
+		sb.WriteString("      Before=kubelet.service crio.service\n")
+		sb.WriteString("      [Service]\n")
+		sb.WriteString("      Type=oneshot\n")
+		sb.WriteString("      RemainAfterExit=yes\n")
+		sb.WriteString("      ExecStart=/usr/sbin/ip link set dev gateway up\n")
+		sb.WriteString(fmt.Sprintf("      ExecStart=/usr/sbin/ip addr replace %s/%d dev gateway\n", gatewayIP, prefix))
+		sb.WriteString("      [Install]\n")
+		sb.WriteString("      WantedBy=multi-user.target\n")
+	}
+
 	sb.WriteString("\n# Start services\n")
 	sb.WriteString("runcmd:\n")
 	sb.WriteString("  - systemctl enable sshd\n")
@@ -655,7 +714,7 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 	if len(ifaceNameMACs) > 0 {
 		sb.WriteString("  - udevadm control --reload-rules\n")
 		sb.WriteString("  - udevadm trigger --subsystem-match=net\n")
-		sb.WriteString("  - /etc/dpu-sim-rename-ifaces.sh\n")
+		sb.WriteString("  - systemctl enable --now dpu-sim-interfaces.service\n")
 		// Restart NM so it loads conf.d/90-dpu-sim-unmanaged.conf (unmanaged-devices).
 		sb.WriteString("  - systemctl restart NetworkManager\n")
 		sb.WriteString("  - systemctl daemon-reload\n")
@@ -663,6 +722,9 @@ func generateUserData(sshPubKey, username, password string, ifaceNameMACs []ifac
 		sb.WriteString("  - systemctl start dpu-sim-k8s-ip.service\n")
 	}
 
+	if gatewayIP != "" {
+		sb.WriteString("  - systemctl enable --now dpu-sim-dpu-gateway.service\n")
+	}
 	return sb.String()
 }
 

@@ -22,9 +22,23 @@ networks:
     use_ovs: false
     attach_to: "any"
 
-  - name: "data-l2-network"
+  # Dedicated DPU gateway network (NAT). Attached only to DPU VMs; hosts
+  # reach it via eth0-0 on the HostToDpu links using addresses from this subnet.
+  - name: "dpu-sim-gateway"
+    type: "gateway"
+    bridge_name: "dpu-sim-gw"
+    gateway: "172.30.0.1"
+    subnet_mask: "255.255.255.0"
+    mode: "nat"
+    nic_model: "virtio"
+    attach_to: "dpu"
+
+  # Dedicated Uplink segment for the VM no-overlay/FRR tests. This is a
+  # libvirt OVS L2 network attached only to DPU VMs; the routing helper joins
+  # the external FRR router and the reserved HostToDpu Uplink interface to it.
+  - name: "uplink-network"
     type: "layer2"
-    bridge_name: "ovs-data"
+    bridge_name: "ovs-uplink"
     mode: "l2-bridge"
     nic_model: "virtio"
     use_ovs: true
@@ -32,8 +46,11 @@ networks:
 
   - name: "host-to-dpu-link"
     type: "HostToDpu"
-    num_pairs: 16
-    mgmt_port_vfs_count: 3
+    # Match the full TFT profile: gateway + 8 management + 1 Uplink +
+    # 118 pod devices per host/DPU pair.
+    num_pairs: 128
+    mgmt_port_vfs_count: 8
+    uplink_vfs_count: 1
     nic_model: "virtio"
 
 vms:
@@ -64,7 +81,7 @@ vms:
     k8s_node_mac: "52:54:00:00:01:12"
     k8s_node_ip: "192.168.123.12"
     memory: 2048  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
   - name: "dpu-1-1"
@@ -75,7 +92,7 @@ vms:
     k8s_node_ip: "192.168.123.22"
     host: "host-1-1"
     memory: 4096  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
   - name: "host-2-1"
@@ -85,7 +102,7 @@ vms:
     k8s_node_mac: "52:54:00:00:01:13"
     k8s_node_ip: "192.168.123.13"
     memory: 2048  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
   - name: "dpu-2-1"
@@ -96,7 +113,7 @@ vms:
     k8s_node_ip: "192.168.123.23"
     host: "host-2-1"
     memory: 4096  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
 operating_system:

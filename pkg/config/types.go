@@ -8,9 +8,15 @@ import (
 )
 
 const (
-	MgmtNetworkName      = "mgmt"
-	K8sNetworkName       = "k8s"
-	KindK8sNetworkName   = "eth0"
+	MgmtNetworkName    = "mgmt"
+	K8sNetworkName     = "k8s"
+	KindK8sNetworkName = "eth0"
+	// KindDPUGatewayInterface is the Kind container NIC used for the DPU
+	// gateway underlay (second interface after eth0).
+	KindDPUGatewayInterface = "eth1"
+	// GatewayNetworkName is the shared type: gateway value for VM and Kind
+	// DPU gateway underlays. On VMs it is also the guest NIC name.
+	GatewayNetworkName   = "gateway"
 	HostToDpuNetworkType = "HostToDpu"
 	VMDeploymentMode     = "vm"
 	KindDeploymentMode   = "kind"
@@ -134,8 +140,11 @@ type NetworkConfig struct {
 	UseOVS     bool   `yaml:"use_ovs,omitempty"`
 	AttachTo   string `yaml:"attach_to,omitempty"`
 	NumPairs   int    `yaml:"num_pairs,omitempty"`
-	// GatewaySubnet is the subnet used by simulated DPU gateway interfaces.
-	// It only applies to HostToDpu networks.
+	// GatewaySubnet is a legacy HostToDpu-only YAML IPv4 CIDR for DPU gateway
+	// traffic when no type: gateway network is declared. Offload validation
+	// synthesizes a type: gateway entry from it and clears this field. On
+	// type: gateway networks the subnet is always derived from gateway +
+	// subnet_mask (YAML gateway_subnet is not allowed).
 	GatewaySubnet string `yaml:"gateway_subnet,omitempty"`
 	// MgmtPortVFsCount is the number of simulated VFs requested by
 	// ovnkube-node for default and primary UDN management ports. It only

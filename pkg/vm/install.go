@@ -84,34 +84,6 @@ func endpointReachable(exec platform.CommandExecutor, endpoint string) bool {
 	return err == nil
 }
 
-// setupOVNBrExForCluster sets up OVN br-ex on all VMs in the cluster
-func (m *VMManager) setupOVNBrExForCluster(clusterRoleMapping config.ClusterRoleMapping, k8sMgr *k8s.K8sMachineManager) error { //nolint:unused
-	for role, vms := range clusterRoleMapping {
-		for _, vmCfg := range vms {
-			vmMgmtIP, err := m.GetVMMgmtIP(vmCfg.Name)
-			if err != nil {
-				return fmt.Errorf("failed to get mgmt IP for %s: %w", vmCfg.Name, err)
-			}
-
-			vmK8sIP, err := m.GetVMK8sIP(vmCfg.Name)
-			if err != nil {
-				return fmt.Errorf("failed to get K8s IP for %s: %w", vmCfg.Name, err)
-			}
-
-			log.Debug("Setting up OVN br-ex on %s (%s) - Mgmt IP: %s, K8s IP: %s",
-				vmCfg.Name, role, vmMgmtIP, vmK8sIP)
-
-			exec := platform.NewSSHExecutor(&m.config.SSH, vmMgmtIP)
-			if err := k8sMgr.SetupOVNBrEx(exec, vmMgmtIP, vmK8sIP); err != nil {
-				return fmt.Errorf("failed to setup OVN br-ex on %s: %w", vmCfg.Name, err)
-			}
-
-			k8sMgr.PrintOVNBrExStatus(exec)
-		}
-	}
-	return nil
-}
-
 // setupK8sCluster sets up a single Kubernetes cluster
 func (m *VMManager) setupK8sCluster(clusterName string, clusterRoleMapping config.ClusterRoleMapping) error {
 	k8sMgr := k8s.NewK8sMachineManager(m.config)
@@ -136,24 +108,14 @@ func (m *VMManager) setupK8sCluster(clusterName string, clusterRoleMapping confi
 		return fmt.Errorf("CNI type is not set for cluster %s", clusterName)
 	}
 
-	//if cniType == config.CNIOVNKubernetes {
-	//	if err := m.setupOVNBrExForCluster(clusterRoleMapping, k8sMgr); err != nil {
-	//		return err
-	//	}
-	//}
 	if m.config.DPUClusterNeedsOVNK(clusterCfg.Name) {
 		if err := m.setupOVNKubernetesOffloadToDPUOVS(clusterCfg.Name); err != nil {
 			return fmt.Errorf("failed to setup OVS on DPU VMs: %w", err)
 		}
 	}
 
-	// Ensure required OVS bridges exist on all nodes and that ovs-vswitchd
-	// has created their kernel datapaths / management sockets. Without this,
-	// ovs-ofctl fails with "<bridge> is not a bridge or a socket".
-	// This is a weird issue which might point to an issue with ovs-vswitchd,
-	// where it doesn't create the management socket for bridges added after
-	// startup.
-	// TODO: Investigate this further in the future.
+	// Ensure bridges and runtime-directory ownership before OVN creates further
+	// gateway/UDN bridges dynamically.
 	isDPU := m.config.IsOffloadDPU() && m.config.IsDPUCluster(clusterCfg.Name)
 	bridges := []string{"br-int"}
 	if isDPU {
@@ -190,7 +152,9 @@ func (m *VMManager) setupK8sCluster(clusterName string, clusterRoleMapping confi
 	firstMasterExec := platform.NewSSHExecutor(&m.config.SSH, firstMasterMgmtIP)
 
 	log.Info("\n=== Initializing first control plane node: %s ===", firstMaster.Name)
-	clusterInfo, err := k8sMgr.InitializeControlPlane(firstMasterExec, firstMaster.Name, firstMasterMgmtIP, podCIDR, serviceCIDR, fmt.Sprintf("%s:6443", firstMasterMgmtIP), []string{firstMasterMgmtIP, firstMasterK8sIP})
+	// The advertised address becomes the kubernetes Service endpoint. Pods
+	// must reach it over the Kubernetes underlay, not the SSH management LAN.
+	clusterInfo, err := k8sMgr.InitializeControlPlane(firstMasterExec, firstMaster.Name, firstMasterK8sIP, podCIDR, serviceCIDR, fmt.Sprintf("%s:6443", firstMasterK8sIP), []string{firstMasterMgmtIP, firstMasterK8sIP}, clusterCfg.CNI == config.CNIOVNKubernetes)
 	if err != nil {
 		return fmt.Errorf("failed to initialize control plane on %s: %w", firstMaster.Name, err)
 	}
@@ -294,8 +258,14 @@ func (m *VMManager) ensureKubeletUsesK8sNodeIP(clusterRoleMapping config.Cluster
 			return fmt.Errorf("%s: %w", vmCfg.Name, err)
 		}
 	}
-	if err := k8s.WaitAllNodesReady(firstMasterExec, 6*time.Minute); err != nil {
-		return err
+	// CNI has not been installed yet (and values-only deliberately defers it).
+	// Wait for the advertised addresses, not NodeReady, which depends on CNI.
+	for _, vmCfg := range patchOrder {
+		if ip := strings.TrimSpace(vmCfg.K8sNodeIP); ip != "" {
+			if err := k8s.WaitNodeInternalIP(firstMasterExec, vmCfg.Name, ip, 6*time.Minute); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -393,9 +363,9 @@ func (m *VMManager) setupOVNKubernetesOffloadToDPUOVS(dpuClusterName string) err
 			return fmt.Errorf("failed to get mgmt IP for DPU %s: %w", pair.DPUNode, err)
 		}
 
-		encapIP, err := m.GetVMK8sIP(pair.DPUNode)
+		encapIP, err := m.config.VMGatewayIP(pair.DPUNode)
 		if err != nil {
-			return fmt.Errorf("failed to get K8s IP for DPU %s: %w", pair.DPUNode, err)
+			return fmt.Errorf("failed to get gateway IP for DPU %s: %w", pair.DPUNode, err)
 		}
 
 		sshExec := platform.NewSSHExecutor(&m.config.SSH, mgmtIP)
@@ -425,46 +395,26 @@ func (m *VMManager) SetupAllK8sClusters() error {
 
 // AssignDpuHostGatewayIPs SSHes into each DPU Host VM and assigns a gateway
 // IP to eth0-0 so OVN-Kubernetes DPU Host mode can find an IPv4 address on the
-// gateway interface. IPs are allocated from the top of the k8s subnet, skipping
-// all IPs already used by VMs or the network gateway.
+// gateway interface. Addresses come from the dedicated gateway subnet,
+// excluding the bridge and DPU gateway NICs.
 func (m *VMManager) AssignDpuHostGatewayIPs() error {
 	if !m.config.IsOffloadDPU() {
 		return nil
 	}
 
-	k8sNet := m.config.GetNetworkByType(config.K8sNetworkName)
-	if k8sNet == nil || k8sNet.SubnetMask == "" {
-		return nil
-	}
-
-	prefix, err := config.PrefixLenFromSubnetMask(k8sNet.SubnetMask)
+	_, subnet, err := net.ParseCIDR(m.config.DPUHostGatewaySubnet())
 	if err != nil {
 		return err
 	}
-
-	_, subnet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", k8sNet.Gateway, prefix))
-	if err != nil {
-		return err
-	}
-
-	var usedIPs []net.IP
-	if gw := net.ParseIP(k8sNet.Gateway); gw != nil {
-		usedIPs = append(usedIPs, gw)
-	}
-	for _, vm := range m.config.VMs {
-		if ip := net.ParseIP(vm.K8sNodeIP); ip != nil {
-			usedIPs = append(usedIPs, ip)
-		}
-	}
+	prefix, _ := subnet.Mask.Size()
 
 	gwIf := fmt.Sprintf(network.HostDataIfFmt, 0)
 
 	for _, pair := range m.config.GetHostDPUPairs("") {
-		gwIP, err := network.GetFreeIPv4AddressInSubnet(subnet, usedIPs)
+		gwIP, err := m.config.VMGatewayIP(pair.HostNode)
 		if err != nil {
-			return fmt.Errorf("no free IP for %s: %w", pair.HostNode, err)
+			return err
 		}
-		usedIPs = append(usedIPs, gwIP)
 
 		gwCIDR := fmt.Sprintf("%s/%d", gwIP, prefix)
 
@@ -482,7 +432,36 @@ func (m *VMManager) AssignDpuHostGatewayIPs() error {
 			return fmt.Errorf("interface %s not ready on %s: %w", gwIf, pair.HostNode, err)
 		}
 
-		if err := sshExec.RunCmd(log.LevelDebug, "ip", "addr", "add", gwCIDR, "dev", gwIf, "noprefixroute"); err != nil {
+		// NetworkManager deliberately leaves data links unmanaged. Restore this
+		// bootstrap address once per boot before OVN discovers its gateway.
+		unit := fmt.Sprintf(""+
+			"[Unit]\n"+
+			"Description=Restore simulator host gateway address\n"+
+			"Requires=dpu-sim-interfaces.service\n"+
+			"After=dpu-sim-interfaces.service\n"+
+			"Before=kubelet.service crio.service\n"+
+			"[Service]\n"+
+			"Type=oneshot\n"+
+			"RemainAfterExit=yes\n"+
+			"ExecStart=/usr/sbin/ip link set dev %s up\n"+
+			"ExecStart=/usr/sbin/ip addr replace %s dev %s\n"+
+			"[Install]\n"+
+			"WantedBy=multi-user.target\n",
+			gwIf, gwCIDR, gwIf)
+		if err := sshExec.WriteFile("/etc/systemd/system/dpu-sim-gateway.service", []byte(unit), 0o644); err != nil {
+			return fmt.Errorf("failed to persist gateway address on %s: %w", pair.HostNode, err)
+		}
+		if err := sshExec.RunCmd(log.LevelDebug, "systemctl", "daemon-reload"); err != nil {
+			return err
+		}
+		if err := sshExec.RunCmd(log.LevelDebug, "systemctl", "enable", "dpu-sim-gateway.service"); err != nil {
+			return err
+		}
+
+		if err := sshExec.RunCmd(log.LevelDebug, "ip", "link", "set", "dev", gwIf, "up"); err != nil {
+			return fmt.Errorf("failed to bring up %s on %s: %w", gwIf, pair.HostNode, err)
+		}
+		if err := sshExec.RunCmd(log.LevelDebug, "ip", "addr", "replace", gwCIDR, "dev", gwIf); err != nil {
 			return fmt.Errorf("failed to assign %s to %s on %s: %w", gwCIDR, gwIf, pair.HostNode, err)
 		}
 

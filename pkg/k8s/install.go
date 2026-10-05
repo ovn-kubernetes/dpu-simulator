@@ -85,12 +85,39 @@ func (m *K8sMachineManager) InstallKubernetes(cmdExec platform.CommandExecutor, 
 	return nil
 }
 
-// EnsureOVNBridges creates the given OVS bridges and restarts openvswitch so
-// that ovs-vswitchd creates the kernel datapaths and management sockets.
-// Without the restart, bridges can exist in the DB but ovs-vswitchd may not
-// have created the kernel datapath, causing "ovs-ofctl: <bridge> is not a
-// bridge or a socket".
+// EnsureOVNBridges creates OVS bridges and grants the daemon access to its
+// runtime directory. Fedora drops ovs-vswitchd to the openvswitch user, while
+// OVN containers chown the shared directory to root. Named ACLs survive that
+// ownership change, allowing sockets for dynamically added gateway/UDN bridges.
 func (m *K8sMachineManager) EnsureOVNBridges(cmdExec platform.CommandExecutor, bridges ...string) error {
+	if err := platform.EnsureDependenciesWithExecutor(cmdExec, []platform.Dependency{{
+		Name: "acl", Reason: "Unprivileged OVS runtime socket access",
+		CheckCmd: []string{"setfacl", "--version"}, InstallFunc: linux.InstallGenericPackage,
+	}}, m.config); err != nil {
+		return fmt.Errorf("failed to install OVS runtime ACL support: %w", err)
+	}
+	const dropInDir = "/etc/systemd/system/ovs-vswitchd.service.d"
+	if err := cmdExec.RunCmd(log.LevelDebug, "sudo", "mkdir", "-p", dropInDir, "/usr/local/libexec"); err != nil {
+		return fmt.Errorf("failed to create OVS service drop-in directory: %w", err)
+	}
+	const accessScriptPath = "/usr/local/libexec/dpu-sim-ovs-runtime-access"
+	const accessScript = `#!/bin/sh
+set -eu
+ovs_pid=$(cat /run/openvswitch/ovs-vswitchd.pid)
+ovs_uid=$(stat -c %u "/proc/$ovs_pid")
+setfacl -m "u:$ovs_uid:rwx,d:u:$ovs_uid:rwx" /run/openvswitch
+find /run/openvswitch -maxdepth 1 -type s -exec setfacl -m "u:$ovs_uid:rw" '{}' +
+`
+	if err := writePrivilegedFile(cmdExec, accessScriptPath, []byte(accessScript), 0o755); err != nil {
+		return fmt.Errorf("failed to write OVS runtime ACL helper: %w", err)
+	}
+	const dropIn = "[Service]\nExecStartPost=" + accessScriptPath + "\n"
+	if err := writePrivilegedFile(cmdExec, dropInDir+"/10-dpu-sim-runtime.conf", []byte(dropIn), 0o644); err != nil {
+		return fmt.Errorf("failed to configure OVS runtime ownership: %w", err)
+	}
+	if err := cmdExec.RunCmd(log.LevelDebug, "sudo", "systemctl", "daemon-reload"); err != nil {
+		return fmt.Errorf("failed to reload OVS service configuration: %w", err)
+	}
 	for _, br := range bridges {
 		if err := cmdExec.RunCmd(log.LevelDebug, "sudo", "ovs-vsctl", "--may-exist", "add-br", br); err != nil {
 			return fmt.Errorf("failed to create %s: %w", br, err)
@@ -98,6 +125,30 @@ func (m *K8sMachineManager) EnsureOVNBridges(cmdExec platform.CommandExecutor, b
 	}
 	if err := cmdExec.RunCmd(log.LevelDebug, "sudo", "systemctl", "restart", "openvswitch"); err != nil {
 		return fmt.Errorf("failed to restart openvswitch (needed so bridge datapaths are created): %w", err)
+	}
+	return nil
+}
+
+// writePrivilegedFile writes the payload as the connected user, then installs
+// it at its privileged destination. SSHExecutor.WriteFile performs the shell
+// redirection as the connected user, so writing directly to /etc fails for
+// non-root SSH accounts even when sudo is available.
+func writePrivilegedFile(cmdExec platform.CommandExecutor, path string, content []byte, mode os.FileMode) error {
+	stdout, stderr, err := cmdExec.Execute("mktemp /tmp/dpu-sim-ovs.XXXXXX")
+	if err != nil {
+		return fmt.Errorf("create temporary file: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	tmpPath := strings.TrimSpace(stdout)
+	if tmpPath == "" {
+		return fmt.Errorf("create temporary file returned an empty path")
+	}
+	defer func() { _ = cmdExec.RemoveAll(tmpPath) }()
+
+	if err := cmdExec.WriteFile(tmpPath, content, mode); err != nil {
+		return fmt.Errorf("write temporary file: %w", err)
+	}
+	if err := cmdExec.RunCmd(log.LevelDebug, "sudo", "install", "-m", fmt.Sprintf("%o", mode.Perm()), tmpPath, path); err != nil {
+		return fmt.Errorf("install privileged file: %w", err)
 	}
 	return nil
 }
@@ -340,7 +391,8 @@ func (m *K8sMachineManager) GenerateCertificateKey(cmdExec platform.CommandExecu
 // avoiding joins tied to one node IP in hybrid/multi-network topologies.
 // extraAPIServerSANs: additional cert SANs so API access remains TLS-valid
 // across alternate node IPs/hostnames used in hybrid or multi-network setups.
-func (m *K8sMachineManager) InitializeControlPlane(cmdExec platform.CommandExecutor, machineName, k8sIP, podCIDR, serviceCIDR, controlPlaneEndpoint string, extraAPIServerSANs []string) (*ControlPlaneInfo, error) {
+// skipKubeProxy omits the addon when OVN provides service routing.
+func (m *K8sMachineManager) InitializeControlPlane(cmdExec platform.CommandExecutor, machineName, k8sIP, podCIDR, serviceCIDR, controlPlaneEndpoint string, extraAPIServerSANs []string, skipKubeProxy bool) (*ControlPlaneInfo, error) {
 	log.Info("Initializing control plane on %s (%s)...", machineName, cmdExec.String())
 	log.Info("K8s IP: %s Pod CIDR: %s, Service CIDR: %s", k8sIP, podCIDR, serviceCIDR)
 
@@ -348,6 +400,9 @@ func (m *K8sMachineManager) InitializeControlPlane(cmdExec platform.CommandExecu
 	sb.WriteString("set -e\n")
 	// Use --upload-certs to enable control plane join for additional masters
 	initCmd := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=%s --service-cidr=%s --apiserver-advertise-address=%s", podCIDR, serviceCIDR, k8sIP)
+	if skipKubeProxy {
+		initCmd += " --skip-phases=addon/kube-proxy"
+	}
 	if strings.TrimSpace(controlPlaneEndpoint) != "" {
 		initCmd += fmt.Sprintf(" --control-plane-endpoint=%s", strings.TrimSpace(controlPlaneEndpoint))
 	}

@@ -94,6 +94,8 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "global.enableOvnKubeIdentity", value: false},
 			helmValue{key: "global.enableMultiNetwork", value: true},
 			helmValue{key: "global.enableNetworkSegmentation", value: true},
+			helmValue{key: "global.v4MasqueradeSubnet", value: "169.254.0.0/17"},
+			helmValue{key: "global.v6MasqueradeSubnet", value: "fd69::/112"},
 			helmValue{key: "global.enableUplink", value: true},
 			helmValue{key: "global.simulateDpu", value: true},
 			helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
@@ -124,6 +126,8 @@ func (m *CNIManager) ovnkHelmOverrides(mode ovnkMode, clusterName, ovnImage stri
 			helmValue{key: "global.enableOvnKubeIdentity", value: false},
 			helmValue{key: "global.enableMultiNetwork", value: true},
 			helmValue{key: "global.enableNetworkSegmentation", value: true},
+			helmValue{key: "global.v4MasqueradeSubnet", value: "169.254.0.0/17"},
+			helmValue{key: "global.v6MasqueradeSubnet", value: "fd69::/112"},
 			helmValue{key: "global.enableUplink", value: true},
 			helmValue{key: "global.simulateDpu", value: true},
 			helmValue{key: "global.gatewayOpts", value: m.config.GatewayOpts(clusterName)},
@@ -274,7 +278,7 @@ func (m *CNIManager) writeFRRK8sRemoteEnv(dpuClusterName, remoteKubeconfigPath, 
 	}
 	envPath := filepath.Join(dir, fmt.Sprintf("%s-frr-k8s.env", dpuClusterName))
 	env := fmt.Sprintf("FRR_K8S_REMOTE_KUBECONFIG=%q\nFRR_K8S_HOST_KUBECONFIG=%q\nFRR_K8S_REMOTE_NODE_MAP=%q\nDPU_SIM_GATEWAY_NETWORK=%q\nDPU_SIM_GATEWAY_SUBNET=%q\nDPU_SIM_UPLINK_HOST_INTERFACES=%q\n",
-		remoteKubeconfigPath, hostKubeconfigPath, strings.Join(entries, ","), m.config.DPUKindGatewayNetworkName(), m.config.DPUHostGatewaySubnet(),
+		remoteKubeconfigPath, hostKubeconfigPath, strings.Join(entries, ","), m.config.DPUGatewayNetworkName(), m.config.DPUHostGatewaySubnet(),
 		strings.Join(m.config.DPUHostUplinkInterfaces(), ","))
 	if err := os.WriteFile(envPath, []byte(env), 0o644); err != nil {
 		return fmt.Errorf("failed to write FRR-K8S env file %s: %w", envPath, err)

@@ -9,6 +9,7 @@ import (
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/platform"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const kubeadmKubeletFlagsPath = "/var/lib/kubelet/kubeadm-flags.env"
@@ -117,6 +118,22 @@ func EnsureKubeletK8sNodeIP(cmdExec platform.CommandExecutor, k8sNodeIP string) 
 		return fmt.Errorf("restart kubelet: %w\nstderr: %s", err, strings.TrimSpace(stderr))
 	}
 	log.Info("kubelet --node-ip set to %s (%s)", k8sNodeIP, cmdExec.String())
+	return nil
+}
+
+// WaitNodeInternalIP waits for kubelet's address update, even while a new node is
+// NotReady because CNI has not been installed. Retry also covers API restarts.
+func WaitNodeInternalIP(cmdExec platform.CommandExecutor, nodeName, nodeIP string, timeout time.Duration) error {
+	if len(validation.IsDNS1123Subdomain(nodeName)) != 0 || net.ParseIP(nodeIP) == nil {
+		return fmt.Errorf("invalid node name or IP: %q %q", nodeName, nodeIP)
+	}
+	script := fmt.Sprintf(`ips=$(sudo kubectl --kubeconfig /etc/kubernetes/admin.conf get node %s -o 'jsonpath={.status.addresses[?(@.type=="InternalIP")].address}') || exit 1
+for ip in $ips; do [ "$ip" = '%s' ] && exit 0; done
+exit 1`, nodeName, nodeIP)
+	stdout, stderr, err := cmdExec.ExecuteRetryWithTimeout(script, 2*time.Second, timeout)
+	if err != nil {
+		return fmt.Errorf("waiting for node %s InternalIP %s: %w\nstdout: %s\nstderr: %s", nodeName, nodeIP, err, strings.TrimSpace(stdout), strings.TrimSpace(stderr))
+	}
 	return nil
 }
 
