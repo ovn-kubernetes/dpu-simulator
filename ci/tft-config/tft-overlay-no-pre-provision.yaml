@@ -1,0 +1,35 @@
+tft:
+  - name: "tft-overlay-no-pre-provision"
+    namespace: "default"
+    test_cases: "1-28,35-40,42-45,70-81"
+    duration: 5
+    pre_provision: false
+    connections:
+      - name: "iperf-tcp"
+        type: "iperf-tcp"
+        instances: 1
+        reverse: false
+        server:
+          - name: "@host-1"
+            persistent: false
+            sriov: true
+            default_network: "default/ovn-primary"
+        client:
+          - name: "@host-2"
+            sriov: true
+            default_network: "default/ovn-primary"
+        resource_name: "dpusim.io/vf"
+      - name: "http-curl"
+        type: "http"
+        instances: 1
+        reverse: false
+        server:
+          - name: "@host-1"
+            persistent: false
+            sriov: true
+            default_network: "default/ovn-primary"
+        client:
+          - name: "@host-2"
+            sriov: true
+            default_network: "default/ovn-primary"
+        resource_name: "dpusim.io/vf"

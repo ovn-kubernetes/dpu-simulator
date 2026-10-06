@@ -137,36 +137,19 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Checkout OVN-Kubernetes
-        env:
-          OVN_KUBERNETES_REPO_URL: ${{ inputs.ovn-kubernetes-repo-url }}
-          OVN_KUBERNETES_REF: ${{ inputs.ovn-kubernetes-ref }}
-        run: |
-          if [ -d "${OVN_KUBERNETES_ROOT}/.git" ]; then
-            git -C "${OVN_KUBERNETES_ROOT}" remote set-url origin "${OVN_KUBERNETES_REPO_URL}"
-            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin "${OVN_KUBERNETES_REF}"
-            git -C "${OVN_KUBERNETES_ROOT}" checkout --detach FETCH_HEAD
-          else
-            rm -rf "${OVN_KUBERNETES_ROOT}"
-            git clone --depth=1 "${OVN_KUBERNETES_REPO_URL}" "${OVN_KUBERNETES_ROOT}"
-            git -C "${OVN_KUBERNETES_ROOT}" fetch --depth=1 origin "${OVN_KUBERNETES_REF}"
-            git -C "${OVN_KUBERNETES_ROOT}" checkout --detach FETCH_HEAD
-          fi
+        uses: ./dpu-simulator/.github/actions/checkout-repo-ref
+        with:
+          repository: ${{ inputs.ovn-kubernetes-repo-url }}
+          ref: ${{ inputs.ovn-kubernetes-ref }}
+          path: ${{ env.OVN_KUBERNETES_ROOT }}
 
       - name: Checkout kubernetes-traffic-flow-tests
         if: ${{ steps.paths.outputs.run_tft == 'true' }}
-        env:
-          TFT_REPO_URL: ${{ inputs.tft-repo-url }}
-          TFT_REF: ${{ inputs.tft-ref }}
-        run: |
-          tft_repo="${TFT_ROOT}"
-          if [ -d "${tft_repo}/.git" ]; then
-            git -C "${tft_repo}" remote set-url origin "${TFT_REPO_URL}"
-          else
-            rm -rf "${tft_repo}"
-            git clone --no-checkout --depth=1 "${TFT_REPO_URL}" "${tft_repo}"
-          fi
-          git -C "${tft_repo}" fetch --depth=1 origin "${TFT_REF}"
-          git -C "${tft_repo}" checkout --detach FETCH_HEAD
+        uses: ./dpu-simulator/.github/actions/checkout-repo-ref
+        with:
+          repository: ${{ inputs.tft-repo-url }}
+          ref: ${{ inputs.tft-ref }}
+          path: ${{ env.TFT_ROOT }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -288,32 +271,14 @@ jobs:
 
       - name: Run traffic flow tests
         if: ${{ steps.paths.outputs.run_tft == 'true' }}
-        working-directory: ${{ steps.paths.outputs.config_workdir }}
-        env:
-          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
-          CONFIG_WORKDIR: ${{ steps.paths.outputs.config_workdir }}
-          TFT_CONFIG_PATH: ${{ steps.paths.outputs.tft_config_path }}
-          TFT_ENABLE_TARGET_ACCESS_SUBTESTS: "true"
-          TFT_ENV: ${{ inputs.tft-env }}
-        run: |
-          tft_env_args=()
-          while IFS= read -r entry || [ -n "${entry}" ]; do
-            [ -z "${entry}" ] && continue
-            key="${entry%%=*}"
-            if [ "${entry}" = "${key}" ]; then
-              echo "::error::tft-env entries must be KEY=VALUE: ${entry}"
-              exit 1
-            fi
-            if [[ ! "${key}" =~ ^TFT_[A-Z0-9_]+$ ]]; then
-              echo "::error::invalid tft-env key: ${key}"
-              exit 1
-            fi
-            tft_env_args+=("${entry}")
-          done <<< "${TFT_ENV}"
-
-          env "${tft_env_args[@]}" \
-            TFT_KUBECONFIG="${CONFIG_WORKDIR}/kubeconfig/dpu-sim-host.kubeconfig" \
-            "${DPU_SIM_ROOT}/bin/dpu-sim" tft run --config "${CONFIG_PATH}" --tft-config "${TFT_CONFIG_PATH}" --tft-repo-path "${TFT_ROOT}" --check
+        uses: ./dpu-simulator/.github/actions/run-tft
+        with:
+          dpu-sim-root: ${{ env.DPU_SIM_ROOT }}
+          config-path: ${{ steps.paths.outputs.config_path }}
+          tft-config-path: ${{ steps.paths.outputs.tft_config_path }}
+          tft-repo-path: ${{ env.TFT_ROOT }}
+          kubeconfig: ${{ steps.paths.outputs.config_workdir }}/kubeconfig/dpu-sim-host.kubeconfig
+          tft-env: ${{ inputs.tft-env }}
 
       - name: Run Uplink DPU e2e tests
         if: ${{ steps.paths.outputs.deploy_mode == 'no-overlay' }}

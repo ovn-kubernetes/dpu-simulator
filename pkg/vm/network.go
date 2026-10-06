@@ -176,7 +176,7 @@ func ensureLibvirtNATFirewallBackend(cmdExec platform.CommandExecutor) error {
 // This was observed in our VM bring-up on Ubuntu 22.04.5 LTS with errors like:
 // "table `nat` is incompatible, use 'nft' tool" during libvirt NAT probing.
 func ensureIptablesLegacyForLibvirtNAT(cmdExec platform.CommandExecutor) (bool, error) {
-	probeOut, probeErr, _ := platform.RunCommandInDir(cmdExec, "", "iptables", []string{"-w", "--table", "nat", "--list-rules"}, 30*time.Second)
+	probeOut, probeErr, _ := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"iptables", "-w", "--table", "nat", "--list-rules"}, 30*time.Second)
 	combined := platform.CombinedCmdOutput(probeOut, probeErr)
 	const natIncompatMarker = "table `nat' is incompatible, use 'nft' tool"
 	if !strings.Contains(combined, natIncompatMarker) {
@@ -212,21 +212,43 @@ func ensureIptablesLegacyForLibvirtNAT(cmdExec platform.CommandExecutor) (bool, 
 	return changed, nil
 }
 
-// restartLibvirtForNetworkFirewallChange restarts the first available libvirt
-// service that manages networking after firewall backend updates.
+// restartLibvirtForNetworkFirewallChange reloads or starts the first available
+// libvirt service that manages networking after firewall backend updates.
 // Different distros expose different service names (virtnetworkd/libvirtd).
 func restartLibvirtForNetworkFirewallChange(cmdExec platform.CommandExecutor) error {
 	services := []string{"virtnetworkd", "libvirtd"}
+	var failures []string
 	for _, svc := range services {
-		so, se, err := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"systemctl", "restart", svc}, 3*time.Minute)
-		if err == nil {
-			log.Debug("Restarted %s after libvirt firewall backend update", svc)
-			return nil
+		unit := svc + ".service"
+		if _, _, err := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"systemctl", "cat", unit}, 30*time.Second); err != nil {
+			continue
 		}
-		log.Debug("Failed restarting %s: %v (output: %s)", svc, err, strings.TrimSpace(platform.CombinedCmdOutput(so, se)))
+
+		// Ubuntu uses socket activation for libvirt. Reload an active daemon,
+		// but do not fail merely because a socket-activated service is not
+		// running yet; its socket will start it with the updated configuration.
+		if _, _, activeErr := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"systemctl", "is-active", "--quiet", unit}, 30*time.Second); activeErr == nil {
+			so, se, err := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"systemctl", "try-reload-or-restart", unit}, 3*time.Minute)
+			if err == nil {
+				log.Debug("Reloaded %s after libvirt firewall backend update", svc)
+				return nil
+			}
+			failures = append(failures, fmt.Sprintf("%s: %s", unit, strings.TrimSpace(platform.CombinedCmdOutput(so, se))))
+			continue
+		}
+
+		if so, se, err := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"systemctl", "start", unit}, 3*time.Minute); err == nil {
+			log.Debug("Started %s after libvirt firewall backend update", svc)
+			return nil
+		} else {
+			failures = append(failures, fmt.Sprintf("%s: %s", unit, strings.TrimSpace(platform.CombinedCmdOutput(so, se))))
+		}
 	}
 
-	return fmt.Errorf("failed to restart libvirt service after updating firewall backend")
+	if len(failures) == 0 {
+		return fmt.Errorf("no libvirt service unit was available")
+	}
+	return fmt.Errorf("failed to reload libvirt service after updating firewall backend: %s", strings.Join(failures, "; "))
 }
 
 // setLibvirtFirewallBackend updates firewall_backend in libvirt network.conf
@@ -352,7 +374,7 @@ func CreateOVSBridge(cmdExec platform.CommandExecutor, bridgeName string) error 
 		return fmt.Errorf("failed to create OVS bridge %s: %w, output: %s", bridgeName, err, platform.CombinedCmdOutput(co, ce))
 	}
 
-	bo, be, err := platform.RunCommandInDir(cmdExec, "", "ip", []string{"link", "set", bridgeName, "up"}, 2*time.Minute)
+	bo, be, err := platform.RunCommandInDir(cmdExec, "", "sudo", []string{"ip", "link", "set", bridgeName, "up"}, 2*time.Minute)
 	if err != nil {
 		return fmt.Errorf("failed to bring up OVS bridge %s: %w, output: %s", bridgeName, err, platform.CombinedCmdOutput(bo, be))
 	}
