@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/log"
+	"github.com/ovn-kubernetes/dpu-simulator/pkg/network"
 	"github.com/ovn-kubernetes/dpu-simulator/pkg/platform"
 )
 
 const kindContainerNetworkName = "kind"
+const kindGatewayRoutingComment = "dpu-simulator-kind-gateway-routing"
 
 type containerNetworkInspect struct {
 	ID               string            `json:"Id"`
@@ -59,19 +61,19 @@ func (m *KindManager) setupDPUGatewayRouting(cmdExec platform.CommandExecutor, g
 	if err != nil {
 		return fmt.Errorf("failed to inspect Kind container network %s: %w", kindContainerNetworkName, err)
 	}
-	gatewayInfo, err := m.inspectContainerNetwork(cmdExec, m.config.DPUKindGatewayNetworkName())
+	gatewayInfo, err := m.inspectContainerNetwork(cmdExec, m.config.DPUGatewayNetworkName())
 	if err != nil {
-		return fmt.Errorf("failed to inspect DPU gateway container network %s: %w", m.config.DPUKindGatewayNetworkName(), err)
+		return fmt.Errorf("failed to inspect DPU gateway container network %s: %w", m.config.DPUGatewayNetworkName(), err)
 	}
 	if gatewayInfo.subnet == nil || gatewayInfo.subnet.String() != gatewaySubnet.String() {
 		return fmt.Errorf("DPU gateway network %s has subnet %v, expected %s",
 			gatewayInfo.name, gatewayInfo.subnet, gatewaySubnet.String())
 	}
 
-	if err := enableIPv4BridgeForwarding(cmdExec, kindInfo.bridge); err != nil {
+	if err := network.EnableIPv4BridgeForwarding(cmdExec, kindInfo.bridge); err != nil {
 		return fmt.Errorf("failed to enable IPv4 forwarding on %s: %w", kindInfo.bridge, err)
 	}
-	if err := enableIPv4BridgeForwarding(cmdExec, gatewayInfo.bridge); err != nil {
+	if err := network.EnableIPv4BridgeForwarding(cmdExec, gatewayInfo.bridge); err != nil {
 		return fmt.Errorf("failed to enable IPv4 forwarding on %s: %w", gatewayInfo.bridge, err)
 	}
 
@@ -140,14 +142,14 @@ func (m *KindManager) inspectPodmanInfo(cmdExec platform.CommandExecutor) (*podm
 
 func (m *KindManager) cleanupDPUGatewayRouting(cmdExec platform.CommandExecutor) error {
 	kindInfo, kindErr := m.inspectContainerNetwork(cmdExec, kindContainerNetworkName)
-	gatewayInfo, gatewayErr := m.inspectContainerNetwork(cmdExec, m.config.DPUKindGatewayNetworkName())
+	gatewayInfo, gatewayErr := m.inspectContainerNetwork(cmdExec, m.config.DPUGatewayNetworkName())
 	if kindErr != nil || gatewayErr != nil {
 		log.Debug("Skipping DPU gateway routing cleanup, missing network state: kind=%v gateway=%v", kindErr, gatewayErr)
 		return nil
 	}
 
 	for _, chain := range []string{"DOCKER-USER", "FORWARD"} {
-		if !iptablesChainExists(cmdExec, chain) {
+		if !network.IptablesChainExists(cmdExec, chain) {
 			continue
 		}
 		deleteForwardRule(cmdExec, chain, kindInfo.bridge, gatewayInfo.bridge, kindInfo.subnet, gatewayInfo.subnet)
@@ -161,7 +163,7 @@ func (m *KindManager) cleanupDPUGatewayRouting(cmdExec platform.CommandExecutor)
 
 func (m *KindManager) forwardingRuleChains(cmdExec platform.CommandExecutor) []string {
 	chains := []string{"FORWARD"}
-	if m.containerBin == "docker" && iptablesChainExists(cmdExec, "DOCKER-USER") {
+	if m.containerBin == "docker" && network.IptablesChainExists(cmdExec, "DOCKER-USER") {
 		chains = append([]string{"DOCKER-USER"}, chains...)
 	}
 	return chains
@@ -249,40 +251,8 @@ func networkSubnet(network containerNetworkInspect) (*net.IPNet, error) {
 	return nil, fmt.Errorf("no IPv4 subnet found")
 }
 
-func enableIPv4BridgeForwarding(cmdExec platform.CommandExecutor, bridge string) error {
-	if err := waitForIPv4ForwardingSysctl(cmdExec, bridge); err != nil {
-		return err
-	}
-	return cmdExec.RunCmd(log.LevelInfo, "sudo", "sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.forwarding=1", bridge))
-}
-
-func waitForIPv4ForwardingSysctl(cmdExec platform.CommandExecutor, bridge string) error {
-	const (
-		interval = 500 * time.Millisecond
-		timeout  = 10 * time.Second
-	)
-
-	path := fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/forwarding", bridge)
-	deadline := time.Now().Add(timeout)
-	var lastErr error
-	for {
-		exists, err := cmdExec.FileExists(path)
-		if err == nil && exists {
-			return nil
-		}
-		lastErr = err
-		if time.Now().Add(interval).After(deadline) {
-			if lastErr != nil {
-				return fmt.Errorf("timed out waiting for %s: %w", path, lastErr)
-			}
-			return fmt.Errorf("timed out waiting for %s", path)
-		}
-		time.Sleep(interval)
-	}
-}
-
 func allowBridgeForwardingWithFirewalld(cmdExec platform.CommandExecutor, bridges ...string) error {
-	if !firewalldIsRunning(cmdExec) {
+	if !network.FirewalldIsRunning(cmdExec) {
 		return nil
 	}
 	for _, bridge := range bridges {
@@ -294,7 +264,7 @@ func allowBridgeForwardingWithFirewalld(cmdExec platform.CommandExecutor, bridge
 }
 
 func cleanupFirewalldBridgeForwarding(cmdExec platform.CommandExecutor, bridges ...string) {
-	if !firewalldIsRunning(cmdExec) {
+	if !network.FirewalldIsRunning(cmdExec) {
 		return
 	}
 	for _, bridge := range bridges {
@@ -304,24 +274,12 @@ func cleanupFirewalldBridgeForwarding(cmdExec platform.CommandExecutor, bridges 
 	}
 }
 
-func firewalldIsRunning(cmdExec platform.CommandExecutor) bool {
-	return cmdExec.RunCmd(log.LevelDebug, "firewall-cmd", "--state") == nil
-}
-
 func ensureForwardRule(
 	cmdExec platform.CommandExecutor,
 	chain, inBridge, outBridge string,
 	srcSubnet, dstSubnet *net.IPNet,
 ) error {
-	rule := forwardRuleArgs(inBridge, outBridge, srcSubnet, dstSubnet)
-	if iptablesRuleExists(cmdExec, chain, rule) {
-		return nil
-	}
-	args := append([]string{"iptables", "-I", chain, "1"}, rule...)
-	if err := cmdExec.RunCmd(log.LevelInfo, "sudo", args...); err != nil {
-		return fmt.Errorf("failed to add iptables forwarding rule on %s: %w", chain, err)
-	}
-	return nil
+	return network.EnsureIptablesAcceptRule(cmdExec, chain, kindGatewayRoutingComment, inBridge, outBridge, srcSubnet, dstSubnet)
 }
 
 func ensureRawPreroutingRule(
@@ -359,39 +317,14 @@ func deleteForwardRule(
 	chain, inBridge, outBridge string,
 	srcSubnet, dstSubnet *net.IPNet,
 ) {
-	rule := forwardRuleArgs(inBridge, outBridge, srcSubnet, dstSubnet)
-	for iptablesRuleExists(cmdExec, chain, rule) {
-		args := append([]string{"iptables", "-D", chain}, rule...)
-		if err := cmdExec.RunCmd(log.LevelDebug, "sudo", args...); err != nil {
-			return
-		}
+	if err := network.DeleteIptablesAcceptRule(cmdExec, chain, kindGatewayRoutingComment, inBridge, outBridge, srcSubnet, dstSubnet); err != nil {
+		log.Debug("Failed to delete iptables accept rule on %s: %v", chain, err)
 	}
-}
-
-func iptablesChainExists(cmdExec platform.CommandExecutor, chain string) bool {
-	return cmdExec.RunCmd(log.LevelDebug, "sudo", "iptables", "-nL", chain) == nil
-}
-
-func iptablesRuleExists(cmdExec platform.CommandExecutor, chain string, rule []string) bool {
-	args := append([]string{"iptables", "-C", chain}, rule...)
-	return cmdExec.RunCmd(log.LevelDebug, "sudo", args...) == nil
 }
 
 func iptablesRawPreroutingRuleExists(cmdExec platform.CommandExecutor, rule []string) bool {
 	args := append([]string{"iptables", "-t", "raw", "-C", "PREROUTING"}, rule...)
 	return cmdExec.RunCmd(log.LevelDebug, "sudo", args...) == nil
-}
-
-func forwardRuleArgs(inBridge, outBridge string, srcSubnet, dstSubnet *net.IPNet) []string {
-	return []string{
-		"-i", inBridge,
-		"-o", outBridge,
-		"-s", srcSubnet.String(),
-		"-d", dstSubnet.String(),
-		"-m", "comment",
-		"--comment", "dpu-simulator-kind-gateway-routing",
-		"-j", "ACCEPT",
-	}
 }
 
 func rawPreroutingRuleArgs(inBridge string, srcSubnet, dstSubnet *net.IPNet) []string {
@@ -400,7 +333,7 @@ func rawPreroutingRuleArgs(inBridge string, srcSubnet, dstSubnet *net.IPNet) []s
 		"-s", srcSubnet.String(),
 		"-d", dstSubnet.String(),
 		"-m", "comment",
-		"--comment", "dpu-simulator-kind-gateway-routing",
+		"--comment", kindGatewayRoutingComment,
 		"-j", "ACCEPT",
 	}
 }

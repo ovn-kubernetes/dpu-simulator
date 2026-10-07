@@ -29,11 +29,11 @@ func (m *KindManager) CleanupAll(cfg *config.Config) error {
 
 	if cfg.IsOffloadDPU() {
 		cmdExec := platform.NewLocalExecutor()
-		if err := cmdExec.RunCmd(log.LevelDebug, m.containerBin, "network", "rm", cfg.DPUKindGatewayNetworkName()); err != nil {
+		if err := cmdExec.RunCmd(log.LevelDebug, m.containerBin, "network", "rm", cfg.DPUGatewayNetworkName()); err != nil {
 			if isMissingContainerNetworkError(err) {
-				log.Debug("DPU gateway network %s is already removed: %v", cfg.DPUKindGatewayNetworkName(), err)
+				log.Debug("DPU gateway network %s is already removed: %v", cfg.DPUGatewayNetworkName(), err)
 			} else {
-				errors = append(errors, fmt.Sprintf("Failed to remove DPU gateway network %s: %v", cfg.DPUKindGatewayNetworkName(), err))
+				errors = append(errors, fmt.Sprintf("Failed to remove DPU gateway network %s: %v", cfg.DPUGatewayNetworkName(), err))
 			}
 		}
 	}

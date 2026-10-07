@@ -127,7 +127,7 @@ func (m *KindManager) setupOVNKubernetesOffloadToDPUOVS(cmdExec platform.Command
 	for _, pair := range pairs {
 		dpuExec := platform.NewDockerExecutor(pair.DPUNode, m.containerBin)
 
-		encapIP, err := m.getContainerNetworkIP(cmdExec, pair.DPUNode, m.config.DPUKindGatewayNetworkName())
+		encapIP, err := m.getContainerNetworkIP(cmdExec, pair.DPUNode, m.config.DPUGatewayNetworkName())
 		if err != nil {
 			return fmt.Errorf("failed to get gateway IP for DPU container %s: %w", pair.DPUNode, err)
 		}

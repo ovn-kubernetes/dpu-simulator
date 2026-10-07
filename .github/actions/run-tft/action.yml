@@ -1,0 +1,67 @@
+name: Run traffic flow tests
+description: Apply TFT_* environment overrides and run dpu-sim tft run --check.
+
+inputs:
+  dpu-sim-root:
+    description: Path to the dpu-simulator checkout.
+    required: true
+  config-path:
+    description: Absolute path to the dpu-sim config.
+    required: true
+  tft-config-path:
+    description: Absolute path to the TFT config.
+    required: true
+  tft-repo-path:
+    description: Path to the kubernetes-traffic-flow-tests checkout.
+    required: true
+  kubeconfig:
+    description: Host-cluster kubeconfig used by TFT.
+    required: true
+  tft-env:
+    description: Newline-separated TFT_KEY=VALUE overrides.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Run dpu-sim tft
+      shell: bash
+      working-directory: ${{ inputs.dpu-sim-root }}
+      env:
+        DPU_SIM_ROOT: ${{ inputs.dpu-sim-root }}
+        CONFIG_PATH: ${{ inputs.config-path }}
+        TFT_CONFIG_PATH: ${{ inputs.tft-config-path }}
+        TFT_ROOT: ${{ inputs.tft-repo-path }}
+        TFT_KUBECONFIG: ${{ inputs.kubeconfig }}
+        TFT_ENV: ${{ inputs.tft-env }}
+        # Shared default for Kind and VM; tft-env can still override this key.
+        TFT_ENABLE_TARGET_ACCESS_SUBTESTS: "true"
+      run: |
+        set -euo pipefail
+        if [ ! -f "${TFT_KUBECONFIG}" ]; then
+          echo "::error::host kubeconfig not found: ${TFT_KUBECONFIG} (deploy writes this under the dpu-sim checkout)"
+          exit 1
+        fi
+        tft_env_args=()
+        while IFS= read -r entry || [ -n "${entry}" ]; do
+          [ -z "${entry}" ] && continue
+          key="${entry%%=*}"
+          if [ "${entry}" = "${key}" ]; then
+            echo "::error::tft-env entries must be KEY=VALUE: ${entry}"
+            exit 1
+          fi
+          if [[ ! "${key}" =~ ^TFT_[A-Z0-9_]+$ ]]; then
+            echo "::error::invalid tft-env key: ${key}"
+            exit 1
+          fi
+          tft_env_args+=("${entry}")
+        done <<< "${TFT_ENV}"
+
+        env "${tft_env_args[@]}" \
+          TFT_KUBECONFIG="${TFT_KUBECONFIG}" \
+          "${DPU_SIM_ROOT}/bin/dpu-sim" tft run \
+            --config "${CONFIG_PATH}" \
+            --tft-config "${TFT_CONFIG_PATH}" \
+            --tft-repo-path "${TFT_ROOT}" \
+            --check

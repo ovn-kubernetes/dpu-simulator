@@ -4,6 +4,7 @@ package platform
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -565,11 +566,7 @@ func (e *SSHExecutor) ReadFile(path string) ([]byte, error) {
 
 // WriteFile writes content to a file on the remote system
 func (e *SSHExecutor) WriteFile(path string, content []byte, mode os.FileMode) error {
-	// Use heredoc to write file content
-	// This handles binary and multiline content safely
-	encodedContent := strings.ReplaceAll(string(content), "'", "'\"'\"'")
-	command := fmt.Sprintf("cat > '%s' << 'EOF'\n%s\nEOF\nchmod %o '%s'",
-		path, encodedContent, mode, path)
+	command := sshWriteFileCommand(path, content, mode)
 
 	_, _, err := e.ExecuteWithTimeout(command, 30*time.Second)
 	if err != nil {
@@ -577,6 +574,13 @@ func (e *SSHExecutor) WriteFile(path string, content []byte, mode os.FileMode) e
 	}
 
 	return nil
+}
+
+// Encode the payload so shell syntax, heredoc markers, NULs, and trailing
+// newlines are preserved exactly. Only the destination path needs shell quoting.
+func sshWriteFileCommand(path string, content []byte, mode os.FileMode) string {
+	return fmt.Sprintf("printf %%s %s | base64 -d > %s && chmod %o %s",
+		ShQuote(base64.StdEncoding.EncodeToString(content)), ShQuote(path), mode.Perm(), ShQuote(path))
 }
 
 // RemoveAll removes a path and any children it contains on the remote system

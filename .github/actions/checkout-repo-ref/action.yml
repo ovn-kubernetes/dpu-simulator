@@ -1,0 +1,33 @@
+name: Checkout git ref
+description: Shallow-fetch a repository and detach HEAD at the requested ref.
+
+inputs:
+  repository:
+    description: Git repository URL.
+    required: true
+  ref:
+    description: Branch, tag, or commit to fetch.
+    required: true
+  path:
+    description: Destination directory for the checkout.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Fetch and detach
+      shell: bash
+      env:
+        REPO_URL: ${{ inputs.repository }}
+        REPO_REF: ${{ inputs.ref }}
+        REPO_PATH: ${{ inputs.path }}
+      run: |
+        set -euo pipefail
+        if [ -d "${REPO_PATH}/.git" ]; then
+          git -C "${REPO_PATH}" remote set-url origin "${REPO_URL}"
+        else
+          rm -rf "${REPO_PATH}"
+          git clone --no-checkout --depth=1 "${REPO_URL}" "${REPO_PATH}"
+        fi
+        git -C "${REPO_PATH}" fetch --depth=1 origin "${REPO_REF}"
+        git -C "${REPO_PATH}" checkout --detach FETCH_HEAD

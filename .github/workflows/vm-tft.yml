@@ -1,0 +1,388 @@
+name: VM Overlay
+
+permissions:
+  contents: read
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: dpu-sim config path in the dpu-simulator repository.
+        required: false
+        type: string
+        default: ci/config-vm-ovnk-offload.yaml
+      tft-config:
+        description: TFT config path in the caller repository; empty uses the dpu-sim suite for the deploy mode.
+        required: false
+        type: string
+        default: ""
+      tft-repo-url:
+        description: TFT repository URL.
+        required: false
+        type: string
+        default: https://github.com/ovn-kubernetes/kubernetes-traffic-flow-tests
+      tft-ref:
+        description: TFT git ref.
+        required: false
+        type: string
+        default: main
+      ovn-kubernetes-repo-url:
+        description: OVN-Kubernetes repository URL.
+        required: false
+        type: string
+        default: https://github.com/ovn-kubernetes/ovn-kubernetes
+      ovn-kubernetes-ref:
+        description: OVN-Kubernetes git ref.
+        required: false
+        type: string
+        default: master
+      deploy-mode:
+        description: DPU-Sim deploy mode. VM CI currently supports overlay only.
+        required: false
+        type: string
+        default: overlay
+      run-tft:
+        description: Run kubernetes-traffic-flow-tests after deploy.
+        required: false
+        type: boolean
+        default: true
+      tft-env:
+        description: Newline-separated TFT environment overrides.
+        required: false
+        type: string
+        default: ""
+      artifact-prefix:
+        description: Prefix for uploaded artifacts.
+        required: false
+        type: string
+        default: vm-dpu-offload
+
+jobs:
+  vm-overlay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      DPU_SIM_ROOT: ${{ github.workspace }}/dpu-simulator
+      OVN_KUBERNETES_ROOT: ${{ github.workspace }}/ovn-kubernetes
+      TFT_ROOT: ${{ github.workspace }}/kubernetes-traffic-flow-tests
+      LIBVIRT_DEFAULT_URI: qemu:///system
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Checkout dpu-simulator
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: dpu-simulator
+
+      - name: Free disk space
+        uses: ./dpu-simulator/.github/actions/free-disk-space
+
+      - name: Resolve config paths
+        id: paths
+        env:
+          CONFIG: ${{ inputs.config }}
+          TFT_CONFIG: ${{ inputs.tft-config }}
+          DEPLOY_MODE: ${{ inputs.deploy-mode }}
+          RUN_TFT: ${{ inputs.run-tft }}
+        run: |
+          set -euo pipefail
+          config_path="${DPU_SIM_ROOT}/${CONFIG}"
+          case "${DEPLOY_MODE}" in
+            overlay) ;;
+            *)
+              echo "::error::VM CI currently supports deploy-mode=overlay only (got ${DEPLOY_MODE})"
+              exit 1
+              ;;
+          esac
+          if [ ! -f "${config_path}" ]; then
+            echo "::error::dpu-sim config not found: ${config_path}"
+            exit 1
+          fi
+          # workflow_call boolean defaults to true; treat empty as true for older callers.
+          case "${RUN_TFT}" in
+            false|False|FALSE|0) RUN_TFT=false ;;
+            *) RUN_TFT=true ;;
+          esac
+          tft_config_path=""
+          if [ "${RUN_TFT}" = "true" ]; then
+            if [ -n "${TFT_CONFIG}" ]; then
+              tft_config_path="${GITHUB_WORKSPACE}/${TFT_CONFIG}"
+            else
+              tft_config_path="${DPU_SIM_ROOT}/ci/tft-config/tft-overlay-no-pre-provision.yaml"
+            fi
+            if [ ! -f "${tft_config_path}" ]; then
+              echo "::error::TFT config not found: ${tft_config_path}"
+              exit 1
+            fi
+          fi
+          {
+            echo "config_path=${config_path}"
+            echo "config_workdir=${DPU_SIM_ROOT}"
+            echo "tft_config_path=${tft_config_path}"
+            echo "deploy_mode=${DEPLOY_MODE}"
+            echo "run_tft=${RUN_TFT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout OVN-Kubernetes
+        uses: ./dpu-simulator/.github/actions/checkout-repo-ref
+        with:
+          repository: ${{ inputs.ovn-kubernetes-repo-url }}
+          ref: ${{ inputs.ovn-kubernetes-ref }}
+          path: ${{ env.OVN_KUBERNETES_ROOT }}
+
+      - name: Checkout kubernetes-traffic-flow-tests
+        if: ${{ steps.paths.outputs.run_tft == 'true' }}
+        uses: ./dpu-simulator/.github/actions/checkout-repo-ref
+        with:
+          repository: ${{ inputs.tft-repo-url }}
+          ref: ${{ inputs.tft-ref }}
+          path: ${{ env.TFT_ROOT }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: dpu-simulator/go.mod
+          cache: true
+          cache-dependency-path: dpu-simulator/go.sum
+
+      - name: Install VM dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            libvirt-dev libvirt-clients libvirt-daemon-system qemu-kvm \
+            virtinst genisoimage \
+            openvswitch-switch jq
+          sudo usermod -aG libvirt,kvm "$USER"
+
+          # Nested virt on hosted runners: /dev/kvm is not group-writable for
+          # this session even after usermod (no re-login).
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          sudo chmod 666 /dev/kvm
+
+          # Systemd socket activation owns the qemu:///system socket. Settings
+          # in libvirtd.conf cannot override its SocketMode, and the runner
+          # shell does not see usermod group changes. Persist an open mode for
+          # either the legacy or modular libvirt socket so later daemon
+          # restarts retain access for virsh and dpu-sim.
+          for socket in libvirtd virtqemud; do
+            if sudo systemctl cat "${socket}.socket" >/dev/null 2>&1; then
+              sudo mkdir -p "/etc/systemd/system/${socket}.socket.d"
+              printf '%s\n' \
+                '[Socket]' \
+                'SocketMode=0666' \
+                | sudo tee "/etc/systemd/system/${socket}.socket.d/10-dpu-sim.conf" >/dev/null
+            fi
+          done
+          sudo systemctl daemon-reload
+
+          if sudo systemctl cat libvirtd.socket >/dev/null 2>&1; then
+            sudo systemctl enable --now libvirtd.socket libvirtd-ro.socket libvirtd-admin.socket
+          elif sudo systemctl cat virtqemud.socket >/dev/null 2>&1; then
+            sudo systemctl enable --now virtqemud.socket
+          else
+            echo 'No supported libvirt systemd socket unit was found' >&2
+            exit 1
+          fi
+          if [ -S /run/libvirt/libvirt-sock ]; then
+            sudo chmod 666 /run/libvirt/libvirt-sock
+          fi
+          if sudo systemctl cat virtnetworkd.socket >/dev/null 2>&1; then
+            sudo systemctl enable --now virtnetworkd.socket
+          fi
+          sudo systemctl enable --now openvswitch-switch
+
+          sudo mkdir -p /var/lib/libvirt/images /var/lib/libvirt/qemu/nvram
+          sudo chmod 1777 /var/lib/libvirt/images /var/lib/libvirt/qemu/nvram
+          if [ -S /var/run/openvswitch/db.sock ]; then
+            sudo chmod 666 /var/run/openvswitch/db.sock
+          fi
+
+      - name: Install VRF kernel module
+        continue-on-error: true
+        run: |
+          sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe vrf || true
+
+      - name: Verify VM runner
+        run: |
+          set -euo pipefail
+          test -e /dev/kvm
+          command -v virsh
+          command -v qemu-system-x86_64
+          command -v ovs-vsctl
+          virsh -c qemu:///system list --all
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up Python for traffic flow tests
+        if: ${{ steps.paths.outputs.run_tft == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build dpu-sim
+        working-directory: ${{ env.DPU_SIM_ROOT }}
+        run: make build
+
+      # ci/config-vm-ovnk-offload.yaml injects ~/.ssh/id_rsa.pub into cloud-init.
+      # Hosted runners do not ship an SSH keypair.
+      - name: Ensure SSH key for VM cloud-init
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.ssh"
+          chmod 700 "${HOME}/.ssh"
+          if [ ! -f "${HOME}/.ssh/id_rsa" ]; then
+            ssh-keygen -t rsa -b 4096 -f "${HOME}/.ssh/id_rsa" -N "" -C "dpu-sim-ci"
+          fi
+          test -s "${HOME}/.ssh/id_rsa.pub"
+
+      - name: Record revisions
+        env:
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set -euo pipefail
+          mkdir -p "/tmp/${ARTIFACT_PREFIX}-logs"
+          {
+            printf 'dpu-simulator=%s\n' "$(git -C "${DPU_SIM_ROOT}" rev-parse HEAD)"
+            printf 'dpu-simulator-dirty:\n'; git -C "${DPU_SIM_ROOT}" status --porcelain
+            printf 'ovn-kubernetes=%s\n' "$(git -C "${OVN_KUBERNETES_ROOT}" rev-parse HEAD)"
+            if [ -d "${TFT_ROOT}/.git" ]; then
+              printf 'kubernetes-traffic-flow-tests=%s\n' "$(git -C "${TFT_ROOT}" rev-parse HEAD)"
+            fi
+            sha256sum "${DPU_SIM_ROOT}/bin/dpu-sim"
+          } | tee "/tmp/${ARTIFACT_PREFIX}-logs/revisions.txt"
+
+      - name: Deploy VM clusters (OVN-Kubernetes overlay)
+        if: ${{ steps.paths.outputs.deploy_mode == 'overlay' }}
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" \
+            --config "${CONFIG_PATH}" \
+            --ovn-kubernetes-path "${OVN_KUBERNETES_ROOT}"
+
+      - name: Verify clusters are ready
+        if: ${{ steps.paths.outputs.deploy_mode == 'overlay' }}
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        run: |
+          kubectl wait --for=condition=Ready nodes --all \
+            --kubeconfig kubeconfig/dpu-sim-host.kubeconfig --timeout=25m
+          kubectl wait --for=condition=Ready nodes --all \
+            --kubeconfig kubeconfig/dpu-sim-dpu.kubeconfig --timeout=25m
+
+      - name: TFT Python venv
+        if: ${{ steps.paths.outputs.run_tft == 'true' }}
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" tft venv --config "${CONFIG_PATH}" --tft-repo-path "${TFT_ROOT}"
+
+      - name: Run traffic flow tests
+        if: ${{ steps.paths.outputs.run_tft == 'true' }}
+        uses: ./dpu-simulator/.github/actions/run-tft
+        with:
+          dpu-sim-root: ${{ env.DPU_SIM_ROOT }}
+          config-path: ${{ steps.paths.outputs.config_path }}
+          tft-config-path: ${{ steps.paths.outputs.tft_config_path }}
+          tft-repo-path: ${{ env.TFT_ROOT }}
+          kubeconfig: ${{ steps.paths.outputs.config_workdir }}/kubeconfig/dpu-sim-host.kubeconfig
+          tft-env: ${{ inputs.tft-env }}
+
+      # Collect before Cleanup so cancelled/failed runs still leave artifacts.
+      - name: Collect VM overlay diagnostics
+        if: always()
+        continue-on-error: true
+        env:
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+          CONFIG_WORKDIR: ${{ steps.paths.outputs.config_workdir }}
+        run: |
+          set +e
+          logs_dir="/tmp/${ARTIFACT_PREFIX}-logs"
+          mkdir -p "${logs_dir}"
+          virsh -c qemu:///system list --all > "${logs_dir}/libvirt-vms.txt" 2>&1
+          ovs-vsctl show > "${logs_dir}/ovs.txt" 2>&1
+          journalctl -u libvirtd -u virtqemud -u ovs-vswitchd --no-pager \
+            > "${logs_dir}/host-services.log" 2>&1
+
+          host_kc="${CONFIG_WORKDIR}/kubeconfig/dpu-sim-host.kubeconfig"
+          dpu_kc="${CONFIG_WORKDIR}/kubeconfig/dpu-sim-dpu.kubeconfig"
+          if [ -f "${host_kc}" ]; then
+            kubectl --kubeconfig "${host_kc}" get pods -A -o wide \
+              > "${logs_dir}/dpu-sim-host-pods.txt" 2>&1 || true
+            kubectl --kubeconfig "${host_kc}" get nodes -o wide \
+              > "${logs_dir}/dpu-sim-host-nodes.txt" 2>&1 || true
+            kubectl --kubeconfig "${host_kc}" get events -A --sort-by='.lastTimestamp' \
+              > "${logs_dir}/dpu-sim-host-events.txt" 2>&1 || true
+          else
+            echo "host kubeconfig missing: ${host_kc}" > "${logs_dir}/dpu-sim-host-pods.txt"
+          fi
+          if [ -f "${dpu_kc}" ]; then
+            kubectl --kubeconfig "${dpu_kc}" get pods -A -o wide \
+              > "${logs_dir}/dpu-sim-dpu-pods.txt" 2>&1 || true
+            kubectl --kubeconfig "${dpu_kc}" get nodes -o wide \
+              > "${logs_dir}/dpu-sim-dpu-nodes.txt" 2>&1 || true
+            kubectl --kubeconfig "${dpu_kc}" get events -A --sort-by='.lastTimestamp' \
+              > "${logs_dir}/dpu-sim-dpu-events.txt" 2>&1 || true
+          else
+            echo "dpu kubeconfig missing: ${dpu_kc}" > "${logs_dir}/dpu-sim-dpu-pods.txt"
+          fi
+          exit 0
+
+      - name: Upload VM overlay logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-prefix }}-logs
+          path: /tmp/${{ inputs.artifact-prefix }}-logs
+          if-no-files-found: ignore
+
+      - name: Collect TFT results
+        if: ${{ always() && steps.paths.outputs.run_tft == 'true' }}
+        continue-on-error: true
+        env:
+          ARTIFACT_PREFIX: ${{ inputs.artifact-prefix }}
+        run: |
+          set +e
+          results_dir="${TFT_ROOT}/ft-logs"
+          artifact_dir="/tmp/${ARTIFACT_PREFIX}-tft-results"
+          if [ -d "${results_dir}" ]; then
+            mkdir -p "${artifact_dir}"
+            cp -a "${results_dir}/." "${artifact_dir}/" || true
+          fi
+          exit 0
+
+      - name: Upload TFT results
+        if: ${{ always() && steps.paths.outputs.run_tft == 'true' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-prefix }}-tft-results
+          path: /tmp/${{ inputs.artifact-prefix }}-tft-results
+          if-no-files-found: ignore
+
+      - name: Cleanup
+        if: always()
+        continue-on-error: true
+        working-directory: ${{ steps.paths.outputs.config_workdir }}
+        env:
+          CONFIG_PATH: ${{ steps.paths.outputs.config_path }}
+        run: |
+          "${DPU_SIM_ROOT}/bin/dpu-sim" \
+            --config "${CONFIG_PATH}" \
+            --ovn-kubernetes-path "${OVN_KUBERNETES_ROOT}" \
+            --cleanup || true

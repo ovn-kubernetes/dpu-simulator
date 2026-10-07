@@ -46,9 +46,9 @@ networks:
 
   - name: "host-to-dpu-link"
     type: "HostToDpu"
-    # Match the full TFT profile: gateway + 8 management + 1 Uplink +
-    # 118 pod devices per host/DPU pair.
-    num_pairs: 128
+    # Minimal no-pre-provision overlay profile: gateway + 8 management +
+    # 1 Uplink + 7 pod devices per host/DPU pair.
+    num_pairs: 17
     mgmt_port_vfs_count: 8
     uplink_vfs_count: 1
     nic_model: "virtio"
@@ -60,9 +60,9 @@ vms:
     k8s_role: "master"
     k8s_node_mac: "52:54:00:00:01:11"
     k8s_node_ip: "192.168.123.11"
-    memory: 4096  # MB
-    vcpus: 2
-    disk_size: 20  # GB
+    memory: 2688  # MB; leaves room for the OVN node DaemonSet's 1.8 GiB request
+    vcpus: 2 # kubeadm requires at least two CPUs for control-plane nodes
+    disk_size: 8  # GB
 
   - name: "master-2"
     type: "host"
@@ -70,9 +70,9 @@ vms:
     k8s_role: "master"
     k8s_node_mac: "52:54:00:00:02:11"
     k8s_node_ip: "192.168.123.21"
-    memory: 4096  # MB
-    vcpus: 2
-    disk_size: 20  # GB
+    memory: 2688  # MB; leaves room for the OVN node DaemonSet's 1.8 GiB request
+    vcpus: 2 # kubeadm requires at least two CPUs for control-plane nodes
+    disk_size: 8  # GB
 
   - name: "host-1-1"
     type: "host"
@@ -80,9 +80,9 @@ vms:
     k8s_role: "worker"
     k8s_node_mac: "52:54:00:00:01:12"
     k8s_node_ip: "192.168.123.12"
-    memory: 2048  # MB
-    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
-    disk_size: 20  # GB
+    memory: 1280  # MB; sufficient for the DPU-host OVN node pod in the lab
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
 
   - name: "dpu-1-1"
     type: "dpu"
@@ -91,9 +91,9 @@ vms:
     k8s_node_mac: "52:54:00:00:02:12"
     k8s_node_ip: "192.168.123.22"
     host: "host-1-1"
-    memory: 4096  # MB
-    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
-    disk_size: 20  # GB
+    memory: 2176  # MB; leaves scheduler headroom for OVN plus Multus
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
 
   - name: "host-2-1"
     type: "host"
@@ -101,9 +101,9 @@ vms:
     k8s_role: "worker"
     k8s_node_mac: "52:54:00:00:01:13"
     k8s_node_ip: "192.168.123.13"
-    memory: 2048  # MB
-    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
-    disk_size: 20  # GB
+    memory: 1280  # MB; sufficient for the DPU-host OVN node pod in the lab
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
 
   - name: "dpu-2-1"
     type: "dpu"
@@ -112,9 +112,9 @@ vms:
     k8s_node_mac: "52:54:00:00:02:13"
     k8s_node_ip: "192.168.123.23"
     host: "host-2-1"
-    memory: 4096  # MB
-    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
-    disk_size: 20  # GB
+    memory: 2176  # MB; leaves scheduler headroom for OVN plus Multus
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
 
 operating_system:
   # Download from https://download.fedoraproject.org/pub/fedora/linux/releases/

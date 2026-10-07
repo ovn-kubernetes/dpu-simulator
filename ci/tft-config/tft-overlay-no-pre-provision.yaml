@@ -1,16 +1,9 @@
 tft:
-  - name: "tft-no-overlay"
+  - name: "tft-overlay-no-pre-provision"
     namespace: "default"
-    test_cases: "1-24,26-28,35-40,42-45,70-81"
+    test_cases: "1-28,35-40,42-45,70-81"
     duration: 5
-    pre_provision: true
-    udn_primary_network:
-      mode: cudn
-      topology: layer3
-      transport: no-overlay
-      route_advertisement:
-        frr_configuration_selector:
-          name: receive-all
+    pre_provision: false
     connections:
       - name: "iperf-tcp"
         type: "iperf-tcp"

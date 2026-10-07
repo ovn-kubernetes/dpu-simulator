@@ -185,9 +185,9 @@ The simulator supports two deployment modes, configured via different sections i
 
 In production, **OVN-Kubernetes DPU offload** is the pattern where the **host** runs Kubernetes control-plane and “DPU-host” networking components, while the **DPU** runs the data-plane fast path (**Open vSwitch**, OVN integration, representors, and so on). Traffic for pods that are offloaded is steered across the host-DPU link instead of being fully processed on the host NIC networking stack.
 
-**dpu-sim** models that split with **two Kubernetes clusters** in one YAML file (**`kubernetes.clusters`**): workers tagged **`type: host`** belong to the host-side cluster, and **`type: dpu`** workers belong to the DPU-side cluster, with a **`HostToDpu`** network (libvirt + OVS links in VM mode, **veth** links between Kind containers in Kind mode). Set **`kubernetes.offload_dpu: true`** so OVN-Kubernetes is installed in the right **mode per cluster** instead of a single “full” OVN-K on every node:
+**dpu-sim** models that split with **two Kubernetes clusters** in one YAML file (**`kubernetes.clusters`**): workers tagged **`type: host`** belong to the host-side cluster, and **`type: dpu`** workers belong to the DPU-side cluster, with a **`HostToDpu`** network (libvirt + OVS links in VM mode, **veth** links between Kind containers in Kind mode) plus a dedicated **`type: gateway`** underlay for OVN gateway / encap addressing (separate from the **`k8s`** API network). Set **`kubernetes.offload_dpu: true`** so OVN-Kubernetes is installed in the right **mode per cluster** instead of a single “full” OVN-K on every node:
 
-- **DPU-host cluster** (the cluster that does *not* contain `type: dpu` nodes): OVN-Kubernetes **DPU-host** charts run on the host cluster; ovnkube uses the management / gateway path toward the paired DPU. Workloads that request accelerated ports (for example via **Multus** NADs and the device plugin) are set up so traffic can be steered toward the DPU path.
+- **DPU-host cluster** (the cluster that does *not* contain `type: dpu` nodes): OVN-Kubernetes **DPU-host** charts run on the host cluster; ovnkube uses the HostToDpu / gateway path toward the paired DPU. Workloads that request accelerated ports (for example via **Multus** NADs and the device plugin) are set up so traffic can be steered toward the DPU path.
 - **DPU cluster** (the cluster whose workers include `type: dpu`): On DPU nodes, **OVS** is brought up and **`external_ids`** are set the way real DPU nodes expect, then OVN-Kubernetes runs in **DPU** mode alongside whatever **primary CNI** you chose for that cluster. A second primary CNI such as **Flannel** is common so the DPU cluster has its own pod network while OVN-K still handles the offload portion. In the future OVN-Kubernetes will support dual modes meaning that the primary CNI can be OVN-Kubernetes.
 
 With **`offload_dpu`**, dpu-sim can also build and publish a **device plugin** image so simulated “VF” style resources (see **`dpusim.io/vf`** in TFT examples) line up with how upstream OVN-Kubernetes DPU expects **Multus** secondary networks and pod **requests/limits**.
@@ -196,18 +196,19 @@ With **`offload_dpu`**, dpu-sim can also build and publish a **device plugin** i
 
 ### VM Architecture
 
-VM mode runs each node as a **KVM guest** under **libvirt**: dpu-sim defines domains with QEMU, attaches **libvirt networks** (Linux bridge or **Open vSwitch** where configured), and boots a **cloud image** prepared with **cloud-init** (SSH access, interface rename rules, **`k8s`** static addressing, and NetworkManager “unmanaged” MACs so CNIs can own those ports). **Kubernetes and CNI** are installed afterward over **SSH** from the host.
+VM mode runs each node as a **KVM guest** under **libvirt**: dpu-sim defines domains with QEMU, attaches **libvirt networks** (Linux bridge or **Open vSwitch** where configured), and boots a **cloud image** prepared with **cloud-init** (SSH access, interface rename rules, **`k8s`** / **`gateway`** static addressing, and NetworkManager “unmanaged” MACs so CNIs can own those ports). **Kubernetes and CNI** are installed afterward over **SSH** from the host.
 
 - **Hypervisor and XML**: Domains are **`kvm`** with **`cpu mode='host-passthrough'`** so guests see host CPU features. Disks are **qcow2** on **virtio**; the cloud-init payload is attached as a **SATA CD-ROM** for first boot.
 - **x86_64 (`machine='q35'`)**: Guests use the **Q35** chipset, **APIC**, **ACPI**, and an **Intel IOMMU** block suitable for device assignment–style testing and DPU-like topologies.
 - **aarch64 (`machine='virt'`)**: Guests use the **`virt`** machine type with **UEFI (pflash)** when firmware is available on the host; the IOMMU XML block used on x86_64 is **not** enabled there.
 - **One Kubernetes cluster per `kubernetes.clusters` entry**: The same mapping as Kind mode-each VM’s **`k8s_cluster`** selects which kubeadm cluster it joins. Control plane and workers are distinguished with **`k8s_role`** (`master` / `worker`).
-- **Stable node identity on the data plane**: On the network whose **`type` is `k8s`**, the guest NIC uses the MAC from **`k8s_node_mac`** and kubelet is pinned to **`k8s_node_ip`** so the node object matches the subnet plan.
-- **`networks` on the host**: For each bridge-backed entry, dpu-sim creates a **libvirt `network`** (NAT or isolated L2) backed by **`bridge_name`**, optionally with **`<virtualport type='openvswitch'/>`** when **`use_ovs: true`**. **`attach_to`** filters which **`type: host`** or **`type: dpu`** VMs get that interface.
-- **`HostToDpu`**: For each host–DPU pair and each index **`0 … num_pairs-1`**, dpu-sim creates a **dedicated libvirt network** and **OVS bridge** wiring the two guests; extra virtio NICs (with OVS ports) are added to the domain XML on both sides. This is the VM analogue of the Kind **veth** mesh.
-- **Management vs Kubernetes traffic**: **`mgmt`** (and similar) networks are intended for **SSH** and stable reachability. The **`k8s`** network is the underlay CNIs such as **OVN-Kubernetes**. Use **`mgmt`** for interactive access, not the CNI-managed segment.
+- **Stable node identity on the data plane**: On the network whose **`type` is `k8s`**, the guest NIC uses the MAC from **`k8s_node_mac`** and kubelet is pinned to **`k8s_node_ip`** so the node object matches the subnet plan. With **`offload_dpu`**, the control-plane advertise address is the **`k8s`** IP (pods must reach the API on the underlay, not the SSH **`mgmt`** LAN).
+- **`networks` on the host**: For each bridge-backed entry (`mgmt`, `k8s`, the VM Uplink network (`type: layer2`), and `gateway`), dpu-sim creates a **libvirt `network`** (NAT or isolated L2) backed by **`bridge_name`**, optionally with **`<virtualport type='openvswitch'/>`** when **`use_ovs: true`**. **`attach_to`** filters which **`type: host`** or **`type: dpu`** VMs get that interface.
+- **`gateway` (offload)**: Preferred DPU gateway underlay (`attach_to: dpu`). DPU guests get a NIC renamed to **`gateway`** with a static IP from that subnet; host VMs reach the same subnet via **`eth0-0`** on a HostToDpu interface. dpu-sim also opens host forwarding between the **`k8s`** and gateway bridges so Geneve / gateway next-hop traffic can cross libvirt NAT isolation.
+- **`HostToDpu`**: For each host–DPU pair and each index **`0 … num_pairs-1`**, dpu-sim creates a **dedicated libvirt network** and **OVS bridge** wiring the two guests; extra virtio NICs (with OVS ports) are added to the domain XML on both sides. This is the VM analogue of the Kind **veth** mesh. **`eth0-0`** carries the host-side gateway address; remaining indices are management-port / Uplink / pod VFs as in Kind. The reserved Uplink VF is joined to the separate VM `uplink-network` during no-overlay/FRR setup.
+- **Management vs Kubernetes traffic**: **`mgmt`** (and similar) networks are intended for **SSH** and stable reachability. The **`k8s`** network is the underlay for node IPs / the API; the **`gateway`** network is the OVN gateway / encap underlay. Use **`mgmt`** for interactive access, not the CNI-managed segments.
 - **Images and registry**: The **`operating_system`** section drives downloading or reusing the **qcow2** base image. An optional **local container registry** on the host builds and serves images (for example **OVN-Kubernetes**); nodes pull from it during CNI install. With **`kubernetes.offload_dpu`**, a **device plugin** image can be built and published the same way.
-- **Install path**: After VMs are up, dpu-sim uses **SSH** (see **`ssh`**) to run **kubeadm** / **kubelet** bootstrap and then installs the configured **CNI** and **addons** per cluster. **OVN-Kubernetes DPU offload** follows the same split host / DPU cluster idea as Kind: OVS and **`external_ids`** on DPU-side nodes mirror real DPU bring-up.
+- **Install path**: After VMs are up, dpu-sim uses **SSH** (see **`ssh`**) to run **kubeadm** / **kubelet** bootstrap and then installs the configured **CNI** and **addons** per cluster. **OVN-Kubernetes DPU offload** follows the same split host / DPU cluster idea as Kind: OVS and **`external_ids`** (encap IP from the gateway subnet) on DPU-side nodes mirror real DPU bring-up.
 
 ### Kind Architecture
 
@@ -216,9 +217,10 @@ Kind mode models the same **split host / DPU Kubernetes** idea as VM mode, but e
 - **One cluster per `kubernetes.clusters` entry**: dpu-sim builds a separate Kind cluster for each configured cluster name. Nodes are filtered by `k8s_cluster` when the Kind config is generated.
 - **Stable logical names**: Kind does not let you rename nodes, so dpu-sim applies the label **`dpu-sim.org/node-name=<config name>`** on each node. Use that label in `kubectl` to map a config `name` to the actual node object.
 - **In-cluster networking**: Nodes join the default Kind bridge; **`eth0`** is the primary interface Kind uses for the Kubernetes API and pod CNI plumbing. For custom CNIs, the default Kind CNI is disabled (`kindnet` is the exception); **kube-proxy** is turned off when the primary CNI is OVN-Kubernetes (OVN handles service routing).
-- **`HostToDpu` (`networks`)**: After clusters exist, dpu-sim creates **veth data channels** between paired host and DPU **containers** (pairs can span two Kind clusters). Per pair you get `num_pairs` links (`eth0-0` … `eth0-(num_pairs-1)` on the host, `rep0-*` on the DPU). With **`kubernetes.offload_dpu`**, **`eth0-0`** is assigned a gateway IP; **`eth0-1`…`eth0-N`** (`N = mgmt_port_vfs_count`) are management-port VFs; the next `uplink_vfs_count` interfaces are reserved for Uplink gateways (in no device-plugin pool); the remaining indices up to `num_pairs-1` are pod VFs via the device plugin.
+- **`gateway` (`networks`, offload)**: With **`offload_dpu`**, dpu-sim creates a container network (default name **`dpu-sim-gateway`**) from the gateway subnet and attaches DPU nodes to it (second NIC, typically **`eth1`**). Prefer an explicit **`type: gateway`** entry; legacy **`HostToDpu.gateway_subnet`** still works as a fallback (see below).
+- **`HostToDpu` (`networks`)**: After clusters exist, dpu-sim creates **veth data channels** between paired host and DPU **containers** (pairs can span two Kind clusters). Per pair you get `num_pairs` links (`eth0-0` … `eth0-(num_pairs-1)` on the host, `rep0-*` on the DPU). With **`kubernetes.offload_dpu`**, **`eth0-0`** is assigned an IP from the gateway subnet; **`eth0-1`…`eth0-N`** (`N = mgmt_port_vfs_count`) are management-port VFs; the next `uplink_vfs_count` interfaces are reserved for Uplink gateways (in no device-plugin pool); the remaining indices up to `num_pairs-1` are pod VFs via the device plugin.
 - **Images and registry**: Optional **local registry** is attached to the Kind container network so nodes pull custom builds (for example OVN-Kubernetes). If the registry is disabled in Kind mode, images are **built and loaded into Kind** (`kind load`) instead. DPU offload can also pull/load a **device plugin** image when needed for **`kubernetes.offload_dpu`**.
-- **OVN-Kubernetes DPU offload on Kind**: On DPU worker nodes, dpu-sim installs **Open vSwitch inside the DPU container** and sets **`external_ids`** the way the VM flow does on real DPU hardware, then installs the primary CNI (and OVN-Kubernetes in DPU mode when the topology requires it).
+- **OVN-Kubernetes DPU offload on Kind**: On DPU worker nodes, dpu-sim installs **Open vSwitch inside the DPU container** and sets **`external_ids`** (encap IP on the gateway network) the way the VM flow does on real DPU hardware, then installs the primary CNI (and OVN-Kubernetes in DPU mode when the topology requires it). Host forwarding between the Kind bridge and the gateway network is configured so the underlays can reach each other.
 
 ### VM Mode Configuration
 
@@ -228,12 +230,12 @@ VM mode is selected when the file defines **`vms`** and does not combine them wi
 
 Every network needs **`name`** and **`type`**. **`nic_model`** defaults to **`virtio`** if omitted.
 
-**Bridge-backed networks** (any `type` other than `HostToDpu`, for example `mgmt`, `k8s`, or `layer2`):
+**Bridge-backed networks** (`mgmt`, `k8s`, and the VM Uplink network (`type: layer2`); `gateway` has its own section below):
 
 | Field | Required | Default | Notes |
 |-------|----------|---------|--------|
 | `name` | Yes | - | |
-| `type` | Yes | - | Drives how dpu-sim creates the libvirt network (mgmt, k8s, layer2)|
+| `type` | Yes | - | Drives how dpu-sim creates the libvirt network (`mgmt`, `k8s`, `layer2`) |
 | `bridge_name` | Yes | - | This is the name of the bridge from the host point of view. |
 | `mode` | No | `nat` | `nat` or `l2-bridge` |
 | `use_ovs` | No | `false` | When `true`, libvirt uses an Open vSwitch virtual port instead of Linux bridging |
@@ -241,6 +243,22 @@ Every network needs **`name`** and **`type`**. **`nic_model`** defaults to **`vi
 | `nic_model` | No | `virtio` | `virtio`, `igb` or any virtual NIC that libvirt QEMU supports |
 | `gateway`, `subnet_mask`, `dhcp_start`, `dhcp_end` | No | - | Used for managed/NAT-style networks as in the example |
 | `num_pairs` | - | - | Must **not** be set (only valid for `HostToDpu`) |
+
+**Gateway networks** (`type: gateway`, preferred when `kubernetes.offload_dpu: true`):
+
+| Field | Required | Default | Notes |
+|-------|----------|---------|--------|
+| `name`, `type` | Yes | - | Container/libvirt network name (example: `dpu-sim-gateway`) |
+| `gateway` | Yes | - | Must be the first usable address of the subnet |
+| `subnet_mask` | Yes | - | Combined with `gateway` to derive the gateway subnet CIDR (example: `172.30.0.0/24`) |
+| `bridge_name` | VM yes / Kind ignored | - | Host bridge name (example: `dpu-sim-gw`). Not required in Kind mode |
+| `mode` | VM no / Kind ignored | `nat` | Must be `nat` in VM mode |
+| `attach_to` | VM no / Kind ignored | `dpu` | Must be `dpu` in VM mode |
+| `nic_model` | No | `virtio` | |
+| `gateway_subnet` | - | derived | Must **not** be set; derived from `gateway` + `subnet_mask` |
+| `dhcp_start`, `dhcp_end`, `use_ovs`, `num_pairs`, `mgmt_port_vfs_count`, `uplink_vfs_count` | - | - | Must **not** be set |
+
+When `offload_dpu` is enabled and no `type: gateway` network is declared, dpu-sim **synthesizes** one from legacy `HostToDpu.gateway_subnet` (or `172.30.0.0/24` if that field is also omitted) and clears `gateway_subnet` on the HostToDpu entry so the gateway network is the single source of truth. An explicit `type: gateway` network always wins over a leftover `HostToDpu.gateway_subnet`.
 
 **Host To Dpu networks** (`type: HostToDpu`):
 
@@ -250,7 +268,7 @@ Every network needs **`name`** and **`type`**. **`nic_model`** defaults to **`vi
 | `num_pairs` | Recommended | `1` if omitted or ≤ 0 | Number of parallel host–DPU links per pair (libvirt/OVS in VM mode) |
 | `mgmt_port_vfs_count` | No | `min(2, num_pairs-2)` (floored at `0`) | Management-port VFs (`eth0-1`…`eth0-N`); `eth0-0` is gateway-only and not in device plugin pools (`offload_dpu: true` requires at least 1 Pod pseudo-VF) |
 | `uplink_vfs_count` | No | `0` | VFs reserved for Uplink gateway interfaces, right after the mgmt-port range; excluded from device plugin pools (published as `DPU_SIM_UPLINK_HOST_INTERFACES` in the FRR env file) |
-| `gateway_subnet` | No | `172.30.0.0/24` | IPv4 subnet for gateway addresses on `eth0-0` |
+| `gateway_subnet` | No | - | **Legacy fallback** when no `type: gateway` network is declared (default `172.30.0.0/24`). Prefer a `type: gateway` network outside of HostToDpu type |
 | `nic_model` | No | `virtio` | `virtio` is recommended |
 | `bridge_name`, `gateway`, `subnet_mask`, `dhcp_start`, `dhcp_end`, `mode`, `use_ovs`, `attach_to` | - | - | Must **not** be set (will result in validation error) |
 
@@ -260,7 +278,8 @@ Network types change the behaviour of dpu-sim on how they treat the network. For
 
 - **`mgmt`**: A non-changing network to provide SSH access to the machine
 - **`k8s`**: A network that the CNI would have access to. For example OVN-Kubernetes would have control of this network and it's interfaces.
-- **`layer2`**: A network that is layer 2 connection between 2 machines. Currently dpu-sim does not modify this network beyond configuring it.
+- **Uplink network (`name: uplink-network`, `type: layer2`)**: The dedicated OVS-backed Layer-2 segment used by the VM no-overlay/FRR tests. It is attached to DPU VMs, and the routing helper connects the external FRR router and the reserved HostToDpu Uplink interface to this segment.
+- **`gateway`**: Dedicated DPU gateway underlay (`attach_to: dpu`). Used for OVN gateway / encap addressing, separate from the k8s API network.
 
 ##### Network Modes
 
@@ -376,9 +395,18 @@ networks:
     use_ovs: false
     attach_to: "any"
 
-  - name: "data-l2-network"
+  - name: "dpu-sim-gateway"
+    type: "gateway"
+    bridge_name: "dpu-sim-gw"
+    gateway: "172.30.0.1"
+    subnet_mask: "255.255.255.0"
+    mode: "nat"
+    nic_model: "virtio"
+    attach_to: "dpu"
+
+  - name: "uplink-network"
     type: "layer2"
-    bridge_name: "ovs-data"
+    bridge_name: "ovs-uplink"
     mode: "l2-bridge"
     nic_model: "virtio"
     use_ovs: true
@@ -386,7 +414,10 @@ networks:
 
   - name: "host-to-dpu-link"
     type: "HostToDpu"
+    # Match Kind: 8 management + 1 Uplink + remaining pod devices.
     num_pairs: 16
+    mgmt_port_vfs_count: 8
+    uplink_vfs_count: 1
     nic_model: "virtio"
 
 vms:
@@ -428,7 +459,7 @@ vms:
     k8s_node_ip: "192.168.123.22"
     host: "host-1-1"
     memory: 4096  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
   - name: "host-2-1"
@@ -438,7 +469,7 @@ vms:
     k8s_node_mac: "52:54:00:00:01:13"
     k8s_node_ip: "192.168.123.13"
     memory: 2048  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
   - name: "dpu-2-1"
@@ -449,7 +480,7 @@ vms:
     k8s_node_ip: "192.168.123.23"
     host: "host-2-1"
     memory: 4096  # MB
-    vcpus: 2
+    vcpus: 4  # IRQ capacity for 128 virtio host/DPU interfaces
     disk_size: 20  # GB
 
 operating_system:
@@ -515,7 +546,16 @@ Kind mode is selected when the file defines **`kind.nodes`** (non-empty) and doe
 
 #### Networks (`networks`)
 
-Validation uses the **same rules** as VM mode. Typical Kind-only configs list only **`HostToDpu`**; dpu-sim uses that entry to drive **veth data channels** between host and DPU node containers after the clusters are created. Bridge-backed networks (`mgmt`, `k8s`, `layer2`, ...) are **not** attached to Kind nodes by dpu-sim today.
+Validation uses the **same rules** as VM mode for `HostToDpu`. For DPU offload, prefer a lean **`type: gateway`** entry (`name`, `type`, `gateway`, `subnet_mask`); Kind ignores VM-only fields such as `bridge_name`, `mode`, and `attach_to`. `HostToDpu` drives **veth data channels** between host and DPU node containers; when `offload_dpu` is enabled, dpu-sim creates a container gateway network from the gateway subnet (derived from `gateway` + `subnet_mask`, or legacy `HostToDpu.gateway_subnet`, which is synthesized into a `type: gateway` entry and then cleared). Bridge-backed networks, including the VM `uplink-network`, are **not** attached to Kind nodes by dpu-sim. Kind no-overlay/FRR testing creates its own runtime `dpu-sim-uplink` container network instead.
+
+**Gateway networks** (`type: gateway`, preferred when `offload_dpu: true`):
+
+| Field | Required | Default | Notes |
+|-------|----------|---------|--------|
+| `name`, `type` | Yes | - | Container network name (example: `dpu-sim-gateway`) |
+| `gateway` | Yes | - | First usable address of the subnet |
+| `subnet_mask` | Yes | - | Combined with `gateway` to derive the gateway subnet CIDR |
+| `bridge_name`, `mode`, `attach_to`, `nic_model` | No | - | Ignored in Kind mode |
 
 **Host To Dpu networks** (`type: HostToDpu`):
 
@@ -525,7 +565,7 @@ Validation uses the **same rules** as VM mode. Typical Kind-only configs list on
 | `num_pairs` | Recommended | `1` if omitted or ≤ 0 | Parallel data channels per host–DPU pair (`eth0-0` … `eth0-(num_pairs-1)`) |
 | `mgmt_port_vfs_count` | No | `min(2, num_pairs-2)` (floored at `0`) | Management-port VFs (`eth0-1`…`eth0-N`); `eth0-0` is gateway-only and not in device plugin pools (`offload_dpu: true` requires at least 1 Pod pseudo-VF) |
 | `uplink_vfs_count` | No | `0` | VFs reserved for Uplink gateway interfaces, right after the mgmt-port range; excluded from device plugin pools (published as `DPU_SIM_UPLINK_HOST_INTERFACES` in the FRR env file) |
-| `gateway_subnet` | No | `172.30.0.0/24` | IPv4 subnet for gateway addresses on `eth0-0` when `offload_dpu` is enabled |
+| `gateway_subnet` | No | - | **Legacy fallback** when no `type: gateway` network is declared (default `172.30.0.0/24`). Prefer a `type: gateway` network |
 | `nic_model`, `bridge_name`, `gateway`, `subnet_mask`, `dhcp_start`, `dhcp_end`, `mode`, `use_ovs`, `attach_to` | - | - | Must **not** be set |
 
 #### Kind Nodes (`kind.nodes`)
@@ -579,9 +619,16 @@ Edit **`config-kind-ovnk-offload.yaml`** for the two-cluster OVN-Kubernetes DPU 
 
 ```yaml
 networks:
+  - name: "dpu-sim-gateway"
+    type: "gateway"
+    gateway: "172.30.0.1"
+    subnet_mask: "255.255.255.0"
+
   - name: "host-to-dpu-link"
     type: "HostToDpu"
     num_pairs: 16
+    mgmt_port_vfs_count: 8
+    uplink_vfs_count: 1
 
 # Kind cluster configuration: one Kind cluster per kubernetes.clusters entry.
 # Node "name" is applied as a label (dpu-sim.org/node-name); Kind does not support node renaming.
@@ -1050,7 +1097,7 @@ Pushed localhost:5000/dpu-sim-dp:latest to local registry
 === Cleaning up Networks ===
 ✓ Removed network mgmt-network
 ✓ Removed network ovn-network
-✓ Removed network data-l2-network
+✓ Removed network dpu-sim-gateway
 ✓ Removed network host-to-dpu-link
 # ... (per-pair HostToDpu OVS bridges: many lines when num_pairs is large)
 
@@ -1058,8 +1105,7 @@ Pushed localhost:5000/dpu-sim-dp:latest to local registry
 === Creating Networks ===
 ✓ Created network: mgmt-network
 ✓ Created network: ovn-network
-✓ Created OVS bridge: ovs-data
-✓ Created network: data-l2-network
+✓ Created network: dpu-sim-gateway
 # ... (host-to-DPU OVS bridges and networks for each pair × num_pairs)
 ✓ All networks created successfully
 === Creating All VMs ===
@@ -1078,8 +1124,8 @@ Waiting for SSH on master-1...
 ✓ SSH ready on master-1, waiting for cloud-init to finish...
 ✓ cloud-init finished on master-1 (status: done)
 # ... (remaining nodes: IP, SSH, cloud-init)
-Assigned 192.168.123.254/24 to eth0-0 on host-1-1
-Assigned 192.168.123.253/24 to eth0-0 on host-2-1
+Assigned 172.30.0.254/24 to eth0-0 on host-1-1
+Assigned 172.30.0.253/24 to eth0-0 on host-2-1
 
 === Installing Kubernetes and CNI ===
 === Installing Kubernetes on VM-based deployment ===
@@ -1153,9 +1199,9 @@ Deployment local-path-storage/local-path-provisioner not found, skipping DPU-hos
 ✓ Kubernetes cluster dpu-sim-host setup complete
 
 === Setting up Kubernetes cluster dpu-sim-dpu ===
-Configuring OVS external_ids on DPU dpu-1-1 (encap-ip=192.168.123.22, host=host-1-1)...
+Configuring OVS external_ids on DPU dpu-1-1 (encap-ip=172.30.0.2, host=host-1-1)...
 ✓ OVS external_ids configured on DPU dpu-1-1
-Configuring OVS external_ids on DPU dpu-2-1 (encap-ip=192.168.123.23, host=host-2-1)...
+Configuring OVS external_ids on DPU dpu-2-1 (encap-ip=172.30.0.3, host=host-2-1)...
 ✓ OVS external_ids configured on DPU dpu-2-1
 
 === Initializing first control plane node: master-2 ===
@@ -1317,9 +1363,9 @@ Cluster: dpu-sim-dpu
 # ... (same per-node pattern)
 
 Setting up veth topology for pair 0: dpu-sim-host-worker <-> dpu-sim-dpu-worker (16 data channels)
-Assigned 10.89.0.254/24 to eth0-0 in dpu-sim-host-worker
+Assigned 172.30.0.254/24 to eth0-0 in dpu-sim-host-worker
 Setting up veth topology for pair 1: dpu-sim-host-worker2 <-> dpu-sim-dpu-worker2 (16 data channels)
-Assigned 10.89.0.253/24 to eth0-0 in dpu-sim-host-worker2
+Assigned 172.30.0.253/24 to eth0-0 in dpu-sim-host-worker2
 ✓ Veth topology created for 2 host-DPU pairs (16 data channels each)
 
 === Installing CNI ===
@@ -1363,7 +1409,7 @@ Installing OVN-Kubernetes (mode=dpu-host): Pod CIDR: 10.244.0.0/16, Service CIDR
 ✓ Patched deployment local-path-storage/local-path-provisioner for DPU-host simulated VF (dpusim.io/vf)
 
 --- Installing CNI on cluster dpu-sim-dpu ---
-Configuring OVS external_ids on DPU dpu-sim-dpu-worker (encap-ip=10.89.0.63, host=dpu-sim-host-worker)...
+Configuring OVS external_ids on DPU dpu-sim-dpu-worker (encap-ip=172.30.0.2, host=dpu-sim-host-worker)...
 ✓ OVS external_ids configured on DPU dpu-sim-dpu-worker
 # ... (remaining DPU workers)
 Internal API server IP for cluster dpu-sim-dpu: 10.89.0.64
