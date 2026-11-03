@@ -64,6 +64,10 @@ func (c *Config) validateAndSetDefaults() error {
 	var errors []string
 
 	// Validate networks
+	gatewayCount := 0
+	hostToDpuCount := 0
+	mgmtCount := 0
+	k8sCount := 0
 	for i, net := range c.Networks {
 		if net.Name == "" {
 			errors = append(errors, fmt.Sprintf("networks[%d]: 'name' is required", i))
@@ -75,7 +79,20 @@ func (c *Config) validateAndSetDefaults() error {
 			c.Networks[i].NICModel = "virtio"
 		}
 
-		if net.Type == HostToDpuNetworkType {
+		// Count to make sure there is only one of each type.
+		switch net.Type {
+		case HostToDpuNetworkType:
+			hostToDpuCount++
+		case GatewayNetworkName:
+			gatewayCount++
+		case MgmtNetworkName:
+			mgmtCount++
+		case K8sNetworkName:
+			k8sCount++
+		}
+
+		switch net.Type {
+		case HostToDpuNetworkType:
 			if net.BridgeName != "" {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'bridge_name' is not allowed for type %s", i, net.Name, net.Type))
 			}
@@ -103,11 +120,12 @@ func (c *Config) validateAndSetDefaults() error {
 			if c.Networks[i].NumPairs <= 0 {
 				c.Networks[i].NumPairs = 1
 			}
-			if c.Networks[i].GatewaySubnet == "" {
-				c.Networks[i].GatewaySubnet = defaultDPUHostGatewaySubnet
-			}
-			if err := validateIPv4CIDRCapacity(c.Networks[i].GatewaySubnet, c.kindDPUGatewaySubnetRequiredIPs()); err != nil {
-				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'gateway_subnet' must be a valid CIDR: %v", i, net.Name, err))
+			// HostToDpu.gateway_subnet is a legacy YAML input; offload synthesize
+			// migrates it into a type: gateway network (see synthesizeGatewayNetworkFromLegacySubnet).
+			if c.Networks[i].GatewaySubnet != "" {
+				if err := validateIPv4CIDRCapacity(c.Networks[i].GatewaySubnet, c.dpuGatewaySubnetRequiredIPs()); err != nil {
+					errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'gateway_subnet' must be a valid CIDR: %v", i, net.Name, err))
+				}
 			}
 			// One interface is the gateway (eth0-0); at least one must remain for pod VFs.
 			availableMgmtPortVFs := c.Networks[i].NumPairs - 2
@@ -146,7 +164,19 @@ func (c *Config) validateAndSetDefaults() error {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'mgmt_port_vfs_count' + 'uplink_vfs_count' must be <= num_pairs-2 (%d) because %s is reserved for the gateway and at least one VF must remain for pods",
 					i, net.Name, availableMgmtPortVFs, dpusim.HostGatewayInterface))
 			}
-		} else {
+		case GatewayNetworkName:
+			if c.IsVMMode() {
+				if c.Networks[i].Mode == "" {
+					c.Networks[i].Mode = "nat"
+				}
+				if c.Networks[i].AttachTo == "" {
+					c.Networks[i].AttachTo = DpuType
+				}
+			}
+			if err := c.validateGatewayNetwork(i, c.Networks[i]); err != nil {
+				errors = append(errors, err.Error())
+			}
+		default:
 			if net.BridgeName == "" {
 				errors = append(errors, fmt.Sprintf("networks[%d] (%s): 'bridge_name' is required", i, net.Name))
 			}
@@ -170,6 +200,46 @@ func (c *Config) validateAndSetDefaults() error {
 			}
 			if c.Networks[i].AttachTo == "" {
 				c.Networks[i].AttachTo = "any"
+			}
+		}
+	}
+
+	if gatewayCount > 1 {
+		errors = append(errors, "only one network with type 'gateway' is allowed")
+	}
+	if hostToDpuCount > 1 {
+		errors = append(errors, "only one network with type 'HostToDpu' is allowed")
+	}
+	if mgmtCount > 1 {
+		errors = append(errors, "only one network with type 'mgmt' is allowed")
+	}
+	if k8sCount > 1 {
+		errors = append(errors, "only one network with type 'k8s' is allowed")
+	}
+
+	if c.IsOffloadDPU() {
+		if gatewayCount == 0 && hostToDpuCount == 0 {
+			errors = append(errors, "DPU offload requires a HostToDpu network or an explicit gateway network")
+		}
+		if c.IsKindMode() && hostToDpuCount == 0 {
+			errors = append(errors, "Kind DPU offload requires a HostToDpu network")
+		}
+		if c.IsVMMode() && k8sCount == 0 {
+			errors = append(errors, "VM DPU offload requires a k8s network")
+		}
+	}
+
+	if c.IsOffloadDPU() {
+		if err := c.synthesizeGatewayNetworkFromLegacySubnet(); err != nil {
+			errors = append(errors, err.Error())
+		}
+		if c.IsVMMode() {
+			if err := c.validateVMGateway(); err != nil {
+				errors = append(errors, err.Error())
+			}
+		} else if c.IsKindMode() {
+			if err := c.validateKindGateway(); err != nil {
+				errors = append(errors, err.Error())
 			}
 		}
 	}
@@ -985,26 +1055,47 @@ func (c *Config) DPUHostUplinkInterfaces() []string {
 	return names
 }
 
-// DPUHostGatewaySubnet returns the subnet used for simulated DPU gateway
-// router addresses.
+// DPUHostGatewaySubnet is shared by the Kind and VM offload backends.
+// Prefer the gateway network (derived from gateway + subnet_mask). After
+// validateAndSetDefaults with offload, legacy HostToDpu.gateway_subnet is
+// synthesized into a type: gateway entry; the HostToDpu fallback remains for
+// callers that have not run validation yet.
 func (c *Config) DPUHostGatewaySubnet() string {
-	net := c.GetHostToDpuNetwork()
-	if net == nil || net.GatewaySubnet == "" {
-		return defaultDPUHostGatewaySubnet
+	if gw := c.GetGatewayNetwork(); gw != nil {
+		if cidr := gw.GetSubnetCIDR(); cidr != "" {
+			return cidr
+		}
 	}
-	return net.GatewaySubnet
+	if n := c.GetHostToDpuNetwork(); n != nil && n.GatewaySubnet != "" {
+		return n.GatewaySubnet
+	}
+	return defaultDPUHostGatewaySubnet
 }
 
-// DPUKindGatewayNetworkName returns the container network carrying simulated
-// DPU gateway traffic in Kind mode.
-func (c *Config) DPUKindGatewayNetworkName() string {
-	return defaultKindDPUGatewayNetwork
+// DPUGatewayNetworkName identifies the dedicated VM or container network
+// carrying simulated DPU gateway traffic (Kind or VM).
+func (c *Config) DPUGatewayNetworkName() string {
+	if gw := c.GetGatewayNetwork(); gw != nil && gw.Name != "" {
+		return gw.Name
+	}
+	return defaultDPUGatewayNetwork
 }
 
-// DPUKindGatewayNextHop returns the container bridge gateway for the simulated
-// DPU gateway subnet. Docker and Podman assign the first usable address to the
-// bridge when creating a network with an explicit subnet.
-func (c *Config) DPUKindGatewayNextHop() string {
+// DPUGatewayBridgeName returns the host bridge (VM) or expected bridge label
+// for the dedicated DPU gateway network.
+func (c *Config) DPUGatewayBridgeName() string {
+	if gw := c.GetGatewayNetwork(); gw != nil && gw.BridgeName != "" {
+		return gw.BridgeName
+	}
+	return DefaultGatewayBridge
+}
+
+// DPUGatewayNextHop returns the bridge gateway for the simulated DPU gateway
+// subnet. Shared by Kind and VM backends, which both assign the first usable address to the bridge.
+func (c *Config) DPUGatewayNextHop() string {
+	if gw := c.GetGatewayNetwork(); gw != nil && gw.Gateway != "" {
+		return gw.Gateway
+	}
 	_, subnet, err := net.ParseCIDR(c.DPUHostGatewaySubnet())
 	if err != nil {
 		return ""
@@ -1016,13 +1107,13 @@ func (c *Config) DPUKindGatewayNextHop() string {
 	return nextHop.String()
 }
 
-// kindDPUGatewaySubnetRequiredIPs returns the minimum usable IPs needed by the
-// DPU gateway container network. Docker/Podman consumes the first usable IP for
+// dpuGatewaySubnetRequiredIPs returns the minimum usable IPs needed by the
+// DPU gateway network. The backend consumes the first usable IP for
 // the bridge gateway, each DPU node consumes one IP when it connects to the
 // gateway network, and each paired host node gets one veth IP from the same
 // subnet for OVN-Kubernetes gateway traffic.
-func (c *Config) kindDPUGatewaySubnetRequiredIPs() int {
-	if !c.IsKindMode() || !c.IsOffloadDPU() {
+func (c *Config) dpuGatewaySubnetRequiredIPs() int {
+	if !c.IsOffloadDPU() {
 		return 0
 	}
 	pairs := c.GetHostDPUPairs("")
@@ -1310,25 +1401,28 @@ func (c *Config) ClustersOrderedForInstall() []ClusterConfig {
 // daemonset on the given cluster.
 func (c *Config) GatewayInterfaces(clusterName string) string {
 	gatewayIf := K8sNetworkName
+	if c.IsVMMode() && c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
+		gatewayIf = GatewayNetworkName
+	}
 	if c.IsKindMode() {
 		gatewayIf = KindK8sNetworkName
 		if c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
-			gatewayIf = defaultKindDPUGatewayInterface
+			gatewayIf = KindDPUGatewayInterface
 		}
 	}
 	return gatewayIf
 }
 
 // GatewayOpts returns the OVN-Kubernetes gateway options for the given
-// cluster. In Kind DPU mode, OVN's gateway interface is on the simulator
-// gateway network, and the DPU host gateway subnet tells ovnkube how to derive
-// gateway router addresses for paired host nodes. The gateway nexthop is the
-// container bridge gateway on that same subnet.
+// cluster. The DPU gateway subnet tells ovnkube how to derive gateway router
+// addresses for paired host nodes, on either the VM or Kind underlay.
 func (c *Config) GatewayOpts(clusterName string) string {
 	opts := fmt.Sprintf("--gateway-interface=%s", c.GatewayInterfaces(clusterName))
-	if c.IsKindMode() && c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
-		opts = fmt.Sprintf("%s --gateway-router-subnet=%s", opts, c.DPUHostGatewaySubnet())
-		if nextHop := c.DPUKindGatewayNextHop(); nextHop != "" {
+	if c.IsOffloadDPU() && c.IsDPUCluster(clusterName) {
+		if subnet := c.DPUHostGatewaySubnet(); subnet != "" {
+			opts = fmt.Sprintf("%s --gateway-router-subnet=%s", opts, subnet)
+		}
+		if nextHop := c.DPUGatewayNextHop(); nextHop != "" {
 			opts = fmt.Sprintf("%s --gateway-nexthop=%s", opts, nextHop)
 		}
 	}

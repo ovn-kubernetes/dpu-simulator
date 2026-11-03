@@ -12,7 +12,6 @@ const (
 	// DefaultRegistryImage is the Docker image used for the registry.
 	DefaultRegistryImage = "registry:2"
 
-	defaultDPUHostGatewaySubnet    = "172.30.0.0/24"
-	defaultKindDPUGatewayNetwork   = "dpu-sim-gateway"
-	defaultKindDPUGatewayInterface = "eth1"
+	defaultDPUHostGatewaySubnet = "172.30.0.0/24"
+	defaultDPUGatewayNetwork    = "dpu-sim-gateway"
 )

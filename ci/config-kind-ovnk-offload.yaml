@@ -4,10 +4,14 @@
 # The called workflow passes a separate TFT config.
 
 networks:
+  - name: "dpu-sim-gateway"
+    type: "gateway"
+    gateway: "172.30.0.1"
+    subnet_mask: "255.255.255.0"
+
   - name: "host-to-dpu-link"
     type: "HostToDpu"
     num_pairs: 128
-    gateway_subnet: "172.30.0.0/24"
     mgmt_port_vfs_count: 8
     uplink_vfs_count: 1
 

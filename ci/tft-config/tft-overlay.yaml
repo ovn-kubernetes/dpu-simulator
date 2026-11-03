@@ -10,12 +10,12 @@ tft:
         instances: 1
         reverse: false
         server:
-          - name: "dpu-sim-host-worker"
+          - name: "@host-1"
             persistent: false
             sriov: true
             default_network: "default/ovn-primary"
         client:
-          - name: "dpu-sim-host-worker2"
+          - name: "@host-2"
             sriov: true
             default_network: "default/ovn-primary"
         resource_name: "dpusim.io/vf"
@@ -24,12 +24,12 @@ tft:
         instances: 1
         reverse: false
         server:
-          - name: "dpu-sim-host-worker"
+          - name: "@host-1"
             persistent: false
             sriov: true
             default_network: "default/ovn-primary"
         client:
-          - name: "dpu-sim-host-worker2"
+          - name: "@host-2"
             sriov: true
             default_network: "default/ovn-primary"
         resource_name: "dpusim.io/vf"

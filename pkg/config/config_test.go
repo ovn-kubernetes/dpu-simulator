@@ -402,24 +402,38 @@ func TestValidateHostToDpuMgmtPortVFsCountRequiresOneWhenOffloadDPU(t *testing.T
 func TestDPUHostGatewaySubnet(t *testing.T) {
 	tests := []struct {
 		name     string
-		network  NetworkConfig
+		networks []NetworkConfig
 		expected string
 	}{
 		{
-			name:     "defaults gateway subnet",
-			network:  NetworkConfig{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16},
+			name:     "defaults when no gateway subnet configured",
+			networks: []NetworkConfig{{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16}},
 			expected: "172.30.0.0/24",
 		},
 		{
-			name:     "uses configured gateway subnet",
-			network:  NetworkConfig{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16, GatewaySubnet: "172.31.0.0/24"},
+			name: "uses legacy HostToDpu gateway_subnet",
+			networks: []NetworkConfig{
+				{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16, GatewaySubnet: "172.31.0.0/24"},
+			},
 			expected: "172.31.0.0/24",
+		},
+		{
+			name: "prefers explicit gateway network over legacy HostToDpu gateway_subnet",
+			networks: []NetworkConfig{
+				{
+					Name: "dpu-sim-gateway", Type: GatewayNetworkName, BridgeName: DefaultGatewayBridge,
+					Gateway: "172.32.0.1", SubnetMask: "255.255.255.0",
+					Mode: "nat", AttachTo: DpuType,
+				},
+				{Name: "host-to-dpu", Type: HostToDpuNetworkType, NumPairs: 16, GatewaySubnet: "172.31.0.0/24"},
+			},
+			expected: "172.32.0.0/24",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Config{Networks: []NetworkConfig{tt.network}}
+			cfg := Config{Networks: tt.networks}
 			require.NoError(t, cfg.validateAndSetDefaults())
 			assert.Equal(t, tt.expected, cfg.DPUHostGatewaySubnet())
 		})
@@ -482,6 +496,8 @@ func TestKindDPUGatewayOpts(t *testing.T) {
 
 	assert.Equal(t, "--gateway-interface=eth1 --gateway-router-subnet=172.31.0.0/24 --gateway-nexthop=172.31.0.1", cfg.GatewayOpts("dpu"))
 	assert.Equal(t, "--gateway-interface=eth0", cfg.GatewayOpts("host"))
+	require.NotNil(t, cfg.GetGatewayNetwork())
+	require.Empty(t, cfg.GetHostToDpuNetwork().GatewaySubnet)
 }
 
 func TestIsKindMode(t *testing.T) {

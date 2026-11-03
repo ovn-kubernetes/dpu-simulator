@@ -1,0 +1,176 @@
+networks:
+  - name: "mgmt-network"
+    type: "mgmt"
+    bridge_name: "virbr-mgmt"
+    gateway: "192.168.120.1"
+    subnet_mask: "255.255.255.0"
+    dhcp_start: "192.168.120.10"
+    dhcp_end: "192.168.120.100"
+    mode: "nat"
+    nic_model: "virtio"
+    attach_to: "any"  # Attach to all VMs: "dpu", "host", or "any"
+
+  - name: "ovn-network"
+    type: "k8s"
+    bridge_name: "ovn"
+    gateway: "192.168.123.1"
+    subnet_mask: "255.255.255.0"
+    dhcp_start: "192.168.123.50"
+    dhcp_end: "192.168.123.100"
+    mode: "nat"
+    nic_model: "virtio"
+    use_ovs: false
+    attach_to: "any"
+
+  # Dedicated DPU gateway network (NAT). Attached only to DPU VMs; hosts
+  # reach it via eth0-0 on the HostToDpu links using addresses from this subnet.
+  - name: "dpu-sim-gateway"
+    type: "gateway"
+    bridge_name: "dpu-sim-gw"
+    gateway: "172.30.0.1"
+    subnet_mask: "255.255.255.0"
+    mode: "nat"
+    nic_model: "virtio"
+    attach_to: "dpu"
+
+  # Dedicated Uplink segment for the VM no-overlay/FRR tests. This is a
+  # libvirt OVS L2 network attached only to DPU VMs; the routing helper joins
+  # the external FRR router and the reserved HostToDpu Uplink interface to it.
+  - name: "uplink-network"
+    type: "layer2"
+    bridge_name: "ovs-uplink"
+    mode: "l2-bridge"
+    nic_model: "virtio"
+    use_ovs: true
+    attach_to: "dpu"
+
+  - name: "host-to-dpu-link"
+    type: "HostToDpu"
+    # Minimal no-pre-provision overlay profile: gateway + 8 management +
+    # 1 Uplink + 7 pod devices per host/DPU pair.
+    num_pairs: 17
+    mgmt_port_vfs_count: 8
+    uplink_vfs_count: 1
+    nic_model: "virtio"
+
+vms:
+  - name: "master-1"
+    type: "host"
+    k8s_cluster: "dpu-sim-host"
+    k8s_role: "master"
+    k8s_node_mac: "52:54:00:00:01:11"
+    k8s_node_ip: "192.168.123.11"
+    memory: 2688  # MB; leaves room for the OVN node DaemonSet's 1.8 GiB request
+    vcpus: 2 # kubeadm requires at least two CPUs for control-plane nodes
+    disk_size: 8  # GB
+
+  - name: "master-2"
+    type: "host"
+    k8s_cluster: "dpu-sim-dpu"
+    k8s_role: "master"
+    k8s_node_mac: "52:54:00:00:02:11"
+    k8s_node_ip: "192.168.123.21"
+    memory: 2688  # MB; leaves room for the OVN node DaemonSet's 1.8 GiB request
+    vcpus: 2 # kubeadm requires at least two CPUs for control-plane nodes
+    disk_size: 8  # GB
+
+  - name: "host-1-1"
+    type: "host"
+    k8s_cluster: "dpu-sim-host"
+    k8s_role: "worker"
+    k8s_node_mac: "52:54:00:00:01:12"
+    k8s_node_ip: "192.168.123.12"
+    memory: 1280  # MB; sufficient for the DPU-host OVN node pod in the lab
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
+
+  - name: "dpu-1-1"
+    type: "dpu"
+    k8s_cluster: "dpu-sim-dpu"
+    k8s_role: "worker"
+    k8s_node_mac: "52:54:00:00:02:12"
+    k8s_node_ip: "192.168.123.22"
+    host: "host-1-1"
+    memory: 2176  # MB; leaves scheduler headroom for OVN plus Multus
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
+
+  - name: "host-2-1"
+    type: "host"
+    k8s_cluster: "dpu-sim-host"
+    k8s_role: "worker"
+    k8s_node_mac: "52:54:00:00:01:13"
+    k8s_node_ip: "192.168.123.13"
+    memory: 1280  # MB; sufficient for the DPU-host OVN node pod in the lab
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
+
+  - name: "dpu-2-1"
+    type: "dpu"
+    k8s_cluster: "dpu-sim-dpu"
+    k8s_role: "worker"
+    k8s_node_mac: "52:54:00:00:02:13"
+    k8s_node_ip: "192.168.123.23"
+    host: "host-2-1"
+    memory: 2176  # MB; leaves scheduler headroom for OVN plus Multus
+    vcpus: 1  # One vCPU per VM; eight guest vCPUs oversubscribe a four-vCPU runner
+    disk_size: 8  # GB
+
+operating_system:
+  # Download from https://download.fedoraproject.org/pub/fedora/linux/releases/
+  image_url: https://mirror.xenyth.net/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2
+  image_name: "Fedora-x86_64.qcow2"
+
+ssh:
+  user: "root"
+  key_path: "~/.ssh/id_rsa"
+  password: "redhat"  # Default password for console/SSH access
+
+kubernetes:
+  version: "1.33"
+  kubeconfig_dir: "kubeconfig"
+  offload_dpu: true
+  clusters:
+    - name: "dpu-sim-host"
+      # OVN-Kubernetes DPU mode defaults host subnet allocation to /24, so
+      # this CIDR must be broader than /24 unless written as CIDR/hostPrefix.
+      pod_cidr: "10.244.0.0/16"
+      service_cidr: "10.245.0.0/16"
+      cni: "ovn-kubernetes"
+      addons:
+        - multus
+    - name: "dpu-sim-dpu"
+      pod_cidr: "10.246.0.0/16"
+      service_cidr: "10.247.0.0/16"
+      cni: "flannel"
+      addons:
+        - multus
+
+registry:
+  containers:
+    - name: "ovn-kube"
+      cni: "ovn-kubernetes"
+      tag: "ovn-kube:dpu-sim"
+
+tft:
+  - name: "Test 1"
+    namespace: "default"
+    test_cases: "1-24"
+    duration: "10"
+    pre_provision: "true"
+    connections:
+      - name: "Connection_1"
+        type: "iperf-tcp"
+        instances: 1
+        reverse: false
+        server:
+          - name: "host-1-1"
+            persistent: "false"
+            sriov: "true"
+            default_network: "default/ovn-primary"
+        client:
+          - name: "host-2-1"
+            sriov: "true"
+            default_network: "default/ovn-primary"
+        resource_name: "dpusim.io/vf"
+kubeconfig: "kubeconfig/dpu-sim-host.kubeconfig"

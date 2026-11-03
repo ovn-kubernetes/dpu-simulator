@@ -79,6 +79,11 @@ func (m *VMManager) generateNetworkInterfaces(vmCfg config.VMConfig) string {
 		if network.AttachTo != "any" && network.AttachTo != vmCfg.Type {
 			continue
 		}
+		if network.Type == config.GatewayNetworkName {
+			if vmCfg.Type != config.DpuType || vmCfg.Host == "" {
+				continue
+			}
+		}
 		mac := GenerateMACForNetwork(vmCfg.Name, network.Type)
 		if network.Type == config.K8sNetworkName && vmCfg.K8sNodeMAC != "" {
 			mac = vmCfg.K8sNodeMAC
@@ -247,14 +252,6 @@ func findAarch64UEFIFirmwareWithStat(candidates []firmwareCandidate, statFn func
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
-}
-
-func fileSize(path string) int64 { //nolint:unused
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0
-	}
-	return info.Size()
 }
 
 func nvramPathForTemplate(vmName, templatePath string) string {

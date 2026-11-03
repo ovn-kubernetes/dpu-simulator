@@ -1,0 +1,31 @@
+name: VM Mode DPU Offload
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: vm-dpu-offload-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm-dpu-offload:
+    name: VM DPU ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: overlay
+            deploy-mode: overlay
+            run-tft: true
+            artifact-prefix: vm-dpu-offload
+    uses: ./.github/workflows/vm-tft.yml
+    with:
+      deploy-mode: ${{ matrix.deploy-mode }}
+      run-tft: ${{ matrix.run-tft }}
+      artifact-prefix: ${{ matrix.artifact-prefix }}
