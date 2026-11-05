@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -75,4 +76,33 @@ func rewriteCNIHostPathOnly(manifest []byte, hostPath string) []byte {
 	content := string(manifest)
 	content = strings.ReplaceAll(content, "path: /opt/cni/bin", fmt.Sprintf("path: %s", hostPath))
 	return []byte(content)
+}
+
+// manifestImageRe matches container image references in a Kubernetes manifest,
+// e.g. `image: ghcr.io/foo/bar:tag`, optionally quoted or in list form.
+var manifestImageRe = regexp.MustCompile(`(?m)^\s*(?:-\s+)?image:\s*["']?([^\s"']+)`)
+
+// imagesFromManifest returns the unique container images referenced by a
+// Kubernetes manifest, in order of first appearance.
+func imagesFromManifest(manifest []byte) []string {
+	var images []string
+	seen := map[string]bool{}
+	for _, match := range manifestImageRe.FindAllStringSubmatch(string(manifest), -1) {
+		if !seen[match[1]] {
+			seen[match[1]] = true
+			images = append(images, match[1])
+		}
+	}
+	return images
+}
+
+// ManifestImages downloads the manifest at url and returns the unique
+// container images it deploys. Used to preload those images into cluster
+// nodes before the manifest is applied.
+func ManifestImages(url string) ([]string, error) {
+	manifest, err := downloadManifest(url)
+	if err != nil {
+		return nil, err
+	}
+	return imagesFromManifest(manifest), nil
 }
